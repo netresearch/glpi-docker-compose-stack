@@ -1,0 +1,72 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Netresearch DTT GmbH
+#
+# container-structure-test surface tests for the glpi-php-fpm image.
+# Run locally: make test-image
+# Tool: https://github.com/GoogleContainerTools/container-structure-test
+
+schemaVersion: 2.0.0
+
+commandTests:
+  - name: php version is 8.5+
+    command: php
+    args: ["-v"]
+    expectedOutput: ["PHP 8\\.5\\."]
+
+  - name: required PHP extensions loaded
+    command: php
+    args: ["-m"]
+    # PHP 8.5 lists opcache as "Zend OPcache" (Zend extension) — regex
+    # matches that. Other entries are regular PHP modules.
+    expectedOutput:
+      - "bcmath"
+      - "gd"
+      - "intl"
+      - "ldap"
+      - "mbstring"
+      - "Zend OPcache"
+      - "pdo_mysql"
+      - "redis"
+      - "zip"
+
+  - name: artisan boots without fatals
+    command: php
+    args: ["/var/www/html/artisan", "--version"]
+    expectedOutput: ["Laravel Framework"]
+
+  - name: composer install completed (vendor present)
+    command: test
+    args: ["-d", "/var/www/html/vendor"]
+    exitCode: 0
+
+  - name: deps manifest written
+    command: test
+    args: ["-s", "/var/lib/glpi/deps.txt"]
+    exitCode: 0
+
+fileExistenceTests:
+  - name: entrypoint
+    path: /usr/local/bin/entrypoint.sh
+    shouldExist: true
+    permissions: "-rwxr-xr-x"
+  - name: healthcheck binary (cgi-fcgi)
+    path: /usr/bin/cgi-fcgi
+    shouldExist: true
+  - name: tini
+    path: /sbin/tini
+    shouldExist: true
+  - name: artisan
+    path: /var/www/html/artisan
+    shouldExist: true
+  - name: glpi php-fpm pool override
+    path: /usr/local/etc/php-fpm.d/zz-glpi.conf
+    shouldExist: true
+  - name: glpi php.ini override
+    path: /usr/local/etc/php/conf.d/glpi.ini
+    shouldExist: true
+
+metadataTest:
+  exposedPorts: ["9000"]
+  workdir: /var/www/html
+  entrypoint: ["/sbin/tini", "--", "/usr/local/bin/entrypoint.sh"]
+  cmd: ["php-fpm", "--nodaemonize"]

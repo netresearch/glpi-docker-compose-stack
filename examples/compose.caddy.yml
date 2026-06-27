@@ -1,0 +1,75 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Netresearch DTT GmbH
+
+# compose.caddy.yml — overlay to terminate TLS via Caddy
+#
+# Usage:
+#   docker compose -f compose.yml -f examples/compose.caddy.yml up -d
+#
+# The domain Caddy serves is taken from `SNIPEIT_HOST` in your .env
+# (e.g. `SNIPEIT_HOST=glpi.example.com`). Caddy auto-provisions a
+# Let's Encrypt certificate on first request to that hostname and
+# renews it transparently.
+#
+# REQUIREMENTS for automatic TLS:
+#   - The host running this stack is reachable on ports 80 + 443 from
+#     the public internet (HTTP-01 / TLS-ALPN-01 challenge), OR you
+#     configure DNS-01 in Caddyfile with provider credentials.
+#   - `SNIPEIT_HOST` resolves to this host's public IP via DNS.
+#
+# Caddy handles HTTP -> HTTPS redirect, HSTS, and certificate renewal
+# without further configuration.
+
+services:
+  # ---------------------------------------------------------------------
+  # Caddy — TLS-terminating reverse proxy in front of `web`
+  # ---------------------------------------------------------------------
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    mem_limit: 128m
+    cpus: 0.5
+    depends_on:
+      web:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"   # HTTP/3 (QUIC)
+    environment:
+      SNIPEIT_HOST: ${SNIPEIT_HOST:-glpi.example.com}
+    volumes:
+      - ./config/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data            # certs + ACME account state
+      - caddy-config:/config        # autosaved Caddy JSON config
+    healthcheck:
+      # The admin API on :2019 is always-on inside the container.
+      # `wget --spider` returns 0 only on HTTP 2xx/3xx.
+      test: ["CMD", "wget", "-qO-", "--spider", "http://localhost:2019/config/"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE   # bind 80/443 as non-root
+      - DAC_OVERRIDE       # read mounted Caddyfile across uid boundaries
+    networks:
+      - glpi
+
+  # ---------------------------------------------------------------------
+  # web override — Caddy proxies to it via the docker network, so the
+  # host port binding is removed. (Use `!reset` to drop the parent's
+  # `ports:` entry rather than append to it.)
+  # ---------------------------------------------------------------------
+  web:
+    ports: !reset []
+
+volumes:
+  caddy-data:
+    name: glpi-caddy-data
+  caddy-config:
+    name: glpi-caddy-config

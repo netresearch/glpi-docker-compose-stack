@@ -1,0 +1,27 @@
+# Local
+.env
+.env.local
+*.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Build artefacts
+/build/
+/dist/
+/glpi-source/
+
+# Runtime
+/data/
+/backups/
+*.log
+
+# Compose overrides (user-local)
+compose.override.yml
+
+# Test artefacts
+/tests/.cache/

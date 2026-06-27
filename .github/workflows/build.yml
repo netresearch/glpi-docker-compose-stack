@@ -1,0 +1,324 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Netresearch DTT GmbH
+
+name: build
+
+on:
+  # Daily rebuild — picks up base-image CVE fixes, fresh composer deps,
+  # and rebuilds branch-tracking images (master / develop) against
+  # current upstream HEAD.
+  schedule:
+    - cron: '0 4 * * *'   # 04:00 UTC
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+      - 'examples/**'
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      track:
+        description: 'Which stream to build (default: all 3)'
+        type: choice
+        required: false
+        default: 'all'
+        options: ['all', 'tag', 'master', 'develop']
+      snipe_it_version:
+        description: 'Override tag (only used with track=tag; default: read .glpi-version)'
+        required: false
+        default: ''
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/glpi-php-fpm
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  # cancel-in-progress: false ONLY on schedule — interrupting the daily
+  # multi-arch rebuild mid-push could leave half-attached manifests.
+  # For push/pr/dispatch: cancel-in-progress=true so a new commit
+  # supersedes an older queued/running build instead of stacking up.
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
+
+jobs:
+  # ─ Resolve refs / versions / matrix once, upstream of everything ────────
+  # Single source of truth for:
+  #   * `master` / `develop` SHAs at api.github.com (eliminates the TOCTOU
+  #     where the original `merge` job re-resolved 12 min after `build`
+  #     did — if upstream advanced in between, the manifest got tagged
+  #     with the new SHA but the digest came from the old SHA's build).
+  #   * `date_tag` / `build_date` — pinned once so the same logical run
+  #     can't straddle a UTC-midnight boundary and produce two different
+  #     dated tags between build and merge.
+  #   * The active-cell matrix — encodes the event-driven filtering
+  #     (PR → tag-only, workflow_dispatch.track override) UPSTREAM so the
+  #     orchestrator's `cell` matrix never spawns skipped jobs.
+  resolve:
+    name: resolve
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      # Shared facts.
+      date_tag: ${{ steps.r.outputs.date_tag }}
+      build_date: ${{ steps.r.outputs.build_date }}
+      is_release_from_file: ${{ steps.r.outputs.is_release_from_file }}
+      is_main_ref: ${{ steps.r.outputs.is_main_ref }}
+      fork_pr: ${{ steps.r.outputs.fork_pr }}
+      push_artifacts: ${{ steps.r.outputs.push_artifacts }}
+      # Registry + image name — passed through resolve because the
+      # reusable-workflow `with:` block can't reference the workflow's
+      # `env:` context (only github / inputs / matrix / needs / strategy /
+      # vars are allowed there).
+      registry: ${{ steps.r.outputs.registry }}
+      image_name: ${{ steps.r.outputs.image_name }}
+      # JSON cell matrix consumed by the `cell` job below — already
+      # filtered for the current event (PR → tag-only, dispatch.track,
+      # tag/rolling exclude). One include row per active (track,
+      # composer) cell, with all per-cell facts pre-populated so
+      # _build-cell.yml inputs are just `${{ matrix.<field> }}`.
+      cell-matrix: ${{ steps.r.outputs.cell-matrix }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Resolve refs, versions, and active-cell matrix
+        id: r
+        env:
+          # All ${{ ... }} interpolation goes through env vars rather than
+          # directly into the run-script body — sonarcloud rule
+          # githubactions:S7630 (shell injection). Especially important
+          # for INPUT_VERSION which is user-supplied via workflow_dispatch.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_VERSION: ${{ inputs.snipe_it_version }}
+          INPUT_TRACK: ${{ inputs.track }}
+          EVENT: ${{ github.event_name }}
+          PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          REPO_FULL_NAME: ${{ github.repository }}
+          REF_FULL: ${{ github.ref }}
+          REGISTRY: ${{ env.REGISTRY }}
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+        run: |
+          set -euo pipefail
+
+          # ─ Shared facts ─────────────────────────────────────────────
+          BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+          DATE_TAG=$(date -u +'%Y%m%d')
+          IS_MAIN_REF=false
+          [ "$REF_FULL" = "refs/heads/main" ] && IS_MAIN_REF=true
+          IS_RELEASE_FROM_FILE=false
+          [ -z "$INPUT_VERSION" ] && IS_RELEASE_FROM_FILE=true
+          FORK_PR=false
+          if [ "$EVENT" = "pull_request" ] \
+              && [ -n "$PR_HEAD_REPO" ] \
+              && [ "$PR_HEAD_REPO" != "$REPO_FULL_NAME" ]; then
+            FORK_PR=true
+          fi
+          PUSH_ARTIFACTS=true
+          [ "$EVENT" = "pull_request" ] && PUSH_ARTIFACTS=false
+
+          # ─ Per-track resolution ─────────────────────────────────────
+          # tag track
+          if [ -n "$INPUT_VERSION" ]; then
+            TAG_REF="$INPUT_VERSION"
+          else
+            TAG_REF=$(tr -d '[:space:]' < .glpi-version)
+          fi
+          TAG_VERSION="${TAG_REF#v}"
+          TAG_MAJOR=$(echo "$TAG_VERSION" | cut -d. -f1)
+          TAG_MAJOR_MINOR=$(echo "$TAG_VERSION" | cut -d. -f1-2)
+
+          # ─ Active-cell matrix ───────────────────────────────────────
+          # Determine the active tracks FIRST, so the upstream-SHA API
+          # calls below only run for tracks we'll actually build:
+          #   * PR event           → only `tag` track
+          #   * dispatch.track set → only that track
+          #   * tag/rolling        → excluded (symfony/dom-crawler
+          #                          PKSA-5r1g-c7b7-y1zg, see notes
+          #                          below)
+          # All other (track, composer) combinations are active.
+          TRACKS=(tag master develop)
+          if [ "$EVENT" = "pull_request" ]; then
+            TRACKS=(tag)
+          elif [ "$EVENT" = "workflow_dispatch" ] \
+              && [ -n "$INPUT_TRACK" ] \
+              && [ "$INPUT_TRACK" != "all" ]; then
+            TRACKS=("$INPUT_TRACK")
+          fi
+
+          tracks_has() {
+            local needle="$1" t
+            for t in "${TRACKS[@]}"; do [ "$t" = "$needle" ] && return 0; done
+            return 1
+          }
+
+          # master / develop tracks — single API call each, used by both
+          # build and merge so per-cell dereferences can't drift. Only
+          # resolve a branch's SHA when that track is actually active:
+          # otherwise a transient grokability API blip on a tag-only PR
+          # run (or `dispatch track=tag`) would needlessly fail the whole
+          # workflow — including the canonical tag/pinned release build,
+          # which makes zero API calls of its own.
+          # Returns two lines: the FULL commit SHA, then the version
+          # string. The full SHA becomes the build ref (Dockerfile
+          # build-arg) so the codeload tarball is pinned to an immutable
+          # commit — both per-arch builds fetch the exact same source,
+          # and it can't drift from the SHA embedded in the version tag.
+          # The branch name survives only in tags_extra (for the moving
+          # `master` / `develop` / `nightly` tags).
+          resolve_branch() {
+            local branch="$1"
+            local sha
+            sha=$(gh api "repos/grokability/glpi/commits/${branch}" --jq '.sha')
+            if [ -z "$sha" ] || [ "$sha" = "null" ]; then
+              echo "error: could not resolve SHA for grokability/glpi@${branch}" >&2
+              return 1
+            fi
+            printf '%s\n%s\n' "$sha" "${branch}-${DATE_TAG}-${sha:0:7}"
+          }
+          MASTER_REF=""
+          MASTER_VERSION=""
+          DEVELOP_REF=""
+          DEVELOP_VERSION=""
+          if tracks_has master; then
+            master_out=$(resolve_branch master) || exit 1
+            MASTER_REF=$(printf '%s\n' "$master_out" | sed -n 1p)
+            MASTER_VERSION=$(printf '%s\n' "$master_out" | sed -n 2p)
+          fi
+          if tracks_has develop; then
+            develop_out=$(resolve_branch develop) || exit 1
+            DEVELOP_REF=$(printf '%s\n' "$develop_out" | sed -n 1p)
+            DEVELOP_VERSION=$(printf '%s\n' "$develop_out" | sed -n 2p)
+          fi
+
+          # Build per-track facts JSON for jq to consume below.
+          PER_TRACK=$(jq -n \
+              --arg tag_ref         "$TAG_REF" \
+              --arg tag_version     "$TAG_VERSION" \
+              --arg tag_major       "$TAG_MAJOR" \
+              --arg tag_major_minor "$TAG_MAJOR_MINOR" \
+              --arg master_ref      "$MASTER_REF" \
+              --arg master_version  "$MASTER_VERSION" \
+              --arg develop_ref     "$DEVELOP_REF" \
+              --arg develop_version "$DEVELOP_VERSION" \
+              '{
+                tag: {
+                  ref_source: "file",
+                  tags_extra: "",
+                  ref:         $tag_ref,
+                  version:     $tag_version,
+                  major:       $tag_major,
+                  major_minor: $tag_major_minor
+                },
+                master: {
+                  ref_source: "master",
+                  tags_extra: "master",
+                  ref:         $master_ref,
+                  version:     $master_version,
+                  major:       "",
+                  major_minor: ""
+                },
+                develop: {
+                  ref_source: "develop",
+                  tags_extra: "develop,nightly",
+                  ref:         $develop_ref,
+                  version:     $develop_version,
+                  major:       "",
+                  major_minor: ""
+                }
+              }')
+
+          # tag/rolling is structurally impossible to be green: glpi's
+          # tagged composer.json carries a `symfony/dom-crawler ^4.4`
+          # constraint, and Composer's `block-insecure-packages` (default
+          # true since 2.7) refuses to load v4.4.0–v4.4.45 because the
+          # entire range is flagged by security advisory
+          # PKSA-5r1g-c7b7-y1zg. No version satisfies the constraint, so
+          # `composer install` exits 100. The only fix is upstream:
+          # glpi must relax to `^5.0` (or bump the lock for the
+          # remediated 4.4.46+ once Symfony publishes it).
+          # No specific upstream issue exists yet — filtered search:
+          # https://github.com/grokability/glpi/issues?q=is%3Aissue+symfony%2Fdom-crawler
+          # Until then the cell is excluded so CI is genuinely green;
+          # master/rolling and develop/rolling still exercise the
+          # rolling-deps path against their HEAD constraints, which is
+          # where any new transitive CVE would surface first.
+          INCLUDE=$(jq -nc --argjson per_track "$PER_TRACK" \
+              --argjson tracks "$(printf '%s\n' "${TRACKS[@]}" | jq -R . | jq -sc .)" \
+              '[
+                $tracks[] as $t
+                | ["pinned","rolling"][] as $c
+                | select(($t == "tag" and $c == "rolling") | not)
+                | $per_track[$t] + {
+                    track: $t,
+                    composer: $c
+                  }
+              ]')
+
+          CELL_MATRIX=$(jq -nc --argjson include "$INCLUDE" '{include: $include}')
+
+          # ─ Outputs ──────────────────────────────────────────────────
+          {
+            echo "date_tag=$DATE_TAG"
+            echo "build_date=$BUILD_DATE"
+            echo "is_release_from_file=$IS_RELEASE_FROM_FILE"
+            echo "is_main_ref=$IS_MAIN_REF"
+            echo "fork_pr=$FORK_PR"
+            echo "push_artifacts=$PUSH_ARTIFACTS"
+            echo "registry=$REGISTRY"
+            echo "image_name=$IMAGE_NAME"
+            echo "cell-matrix=$CELL_MATRIX"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "─ active cells ─"
+          jq -r '.include[] | "  \(.track)/\(.composer)  ref=\(.ref) version=\(.version)"' <<<"$CELL_MATRIX"
+
+  # ─ Orchestrator: one reusable-workflow call per (track, composer) cell ─
+  # Each call's internal `build` matrix fans out to 2 per-arch jobs and
+  # its internal `merge` job has `needs: build` against ONLY those 2 jobs.
+  # So merge for e.g. master/rolling starts as soon as its amd64+arm64
+  # are done — no waiting on unrelated slow cells. Resolves issue #29.
+  cell:
+    name: cell (${{ matrix.track }}, ${{ matrix.composer }})
+    needs: resolve
+    # Note: reusable-workflow caller jobs don't accept `continue-on-error`
+    # (GHA only allows: name, uses, with, secrets, needs, if, permissions).
+    # The rolling soft-fail semantic is enforced inside _build-cell.yml on
+    # each of its jobs via `continue-on-error: ${{ inputs.composer == 'rolling' }}`.
+    # When all inner jobs are continue-on-error, the reusable workflow's
+    # overall conclusion is `success` even if jobs failed — so rolling cell
+    # failures don't bubble up to the orchestrator. fail-fast: false below
+    # additionally keeps a hard pinned-cell failure from cancelling siblings.
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.resolve.outputs.cell-matrix) }}
+    uses: ./.github/workflows/_build-cell.yml
+    with:
+      track: ${{ matrix.track }}
+      composer: ${{ matrix.composer }}
+      ref_source: ${{ matrix.ref_source }}
+      tags_extra: ${{ matrix.tags_extra }}
+      ref: ${{ matrix.ref }}
+      version: ${{ matrix.version }}
+      major: ${{ matrix.major }}
+      major_minor: ${{ matrix.major_minor }}
+      build_date: ${{ needs.resolve.outputs.build_date }}
+      date_tag: ${{ needs.resolve.outputs.date_tag }}
+      registry: ${{ needs.resolve.outputs.registry }}
+      image_name: ${{ needs.resolve.outputs.image_name }}
+      is_main_ref: ${{ needs.resolve.outputs.is_main_ref == 'true' }}
+      is_release_from_file: ${{ needs.resolve.outputs.is_release_from_file == 'true' }}
+      fork_pr: ${{ needs.resolve.outputs.fork_pr == 'true' }}
+      push_artifacts: ${{ needs.resolve.outputs.push_artifacts == 'true' }}

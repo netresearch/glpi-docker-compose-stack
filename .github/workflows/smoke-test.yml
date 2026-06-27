@@ -1,0 +1,178 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Netresearch DTT GmbH
+#
+# Smoke tests for the glpi-docker-compose-stack repo.
+#
+# Splits into:
+#   - image-surface     → delegates buildx --load amd64 +
+#                         container-structure-test to the netresearch/.github
+#                         reusable smoke-test-container.yml. Pinned to the
+#                         feature branch until PR netresearch/.github#141
+#                         merges; flip to @main then.
+#   - compose-up        → stays inline. Boots the full compose stack with
+#                         placeholder-substituted .env and probes / for
+#                         HTTP 200/302 — glpi-specific bootstrap and
+#                         known HTTP route.
+#   - init-idempotency  → stays inline. Verifies bin/init.sh is idempotent —
+#                         glpi-specific contract (APP_KEY / random PW
+#                         generation must not re-roll on second run).
+#   - upstream-tests    → stays inline. Builds the `tester` Dockerfile stage
+#                         which runs the upstream GLPI phpunit suite —
+#                         glpi-specific target stage.
+
+name: smoke-test
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+  workflow_dispatch:
+    inputs:
+      run_upstream_tests:
+        description: 'Also run GLPI phpunit suite (slow, ~5-10 min)'
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: smoke-test-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  image-surface:
+    uses: netresearch/.github/.github/workflows/smoke-test-container.yml@main
+    permissions:
+      contents: read
+    with:
+      image-tag: glpi-php-fpm:test
+      target: runtime
+      cst-config-path: tests/container-structure-test.yaml
+      cache-scope: smoke-test
+
+  compose-up:
+    name: stack boots healthy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+      - name: Build :latest locally (amd64) and load into docker
+        # ghcr.io tag may not exist yet (first push to main) or may be
+        # behind HEAD. Build from current Dockerfile and tag it
+        # `ghcr.io/.../glpi-php-fpm:latest` so compose.yml's
+        # `image:` reference resolves to the local one before compose
+        # tries to pull from the registry.
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: .
+          target: runtime
+          platforms: linux/amd64
+          load: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/glpi-php-fpm:latest
+          cache-from: type=gha,scope=smoke-test
+          cache-to: type=gha,scope=smoke-test,mode=max
+          # Authenticated github.com access during composer require. Same
+          # security model as .github/workflows/build.yml — withheld from
+          # fork PRs to prevent token exfiltration via Dockerfile edits.
+          secrets: |
+            GH_TOKEN=${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && secrets.GITHUB_TOKEN || '' }}
+      - name: Bootstrap .env
+        run: |
+          cp .env.example .env
+          sed -i \
+            -e 's|^APP_KEY=$|APP_KEY=base64:Q0lfUExBQ0VIT0xERVJfS0VZX0ZPUl9DSV9PTkxZX1VTRQ==|' \
+            -e 's|^DB_PASSWORD=$|DB_PASSWORD=ci-pw-not-secret|' \
+            -e 's|^DB_ROOT_PASSWORD=$|DB_ROOT_PASSWORD=ci-rootpw-not-secret|' \
+            .env
+          chmod 0600 .env
+      - name: docker compose up -d (uses locally-loaded image + pulls deps)
+        # The glpi-php-fpm:latest image is already in local docker store
+        # (from the previous buildx --load step), so compose won't re-pull
+        # it. The other services (mariadb, valkey, nginx, ofelia, phpbu) are
+        # pulled normally — `--pull missing` is the default.
+        run: docker compose up -d --wait --wait-timeout 300
+      - name: Wait for HTTP 200/302 on /
+        run: |
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/ || true)
+            case "$code" in
+              200|302)
+                echo "got HTTP $code — pass"
+                exit 0
+                ;;
+            esac
+            echo "[$i] HTTP $code — retrying in 5 s"
+            sleep 5
+          done
+          echo "stack didn't return 200/302 in 150 s"
+          docker compose logs --tail=200
+          exit 1
+      - name: Tear down (cleanup)
+        if: always()
+        run: docker compose down -v
+
+  init-idempotency:
+    name: init.sh is idempotent
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+      - name: Build :latest locally so init.sh can generate APP_KEY
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: .
+          target: runtime
+          platforms: linux/amd64
+          load: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/glpi-php-fpm:latest
+          cache-from: type=gha,scope=smoke-test
+          # Authenticated github.com access during composer require. Same
+          # security model as build.yml — withheld from fork PRs.
+          secrets: |
+            GH_TOKEN=${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && secrets.GITHUB_TOKEN || '' }}
+      - name: First run
+        run: ./bin/init.sh
+      - name: Snapshot .env
+        run: cp .env .env.firstrun
+      - name: Second run (must not change APP_KEY or passwords)
+        run: |
+          ./bin/init.sh
+          if ! diff -u .env.firstrun .env; then
+            echo "init.sh is NOT idempotent — APP_KEY or random PWs were re-rolled"
+            exit 1
+          fi
+
+  upstream-tests:
+    name: GLPI phpunit suite
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'workflow_dispatch' &&
+      inputs.run_upstream_tests
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+      - name: Build + run tester stage (executes upstream phpunit)
+        # The tester stage exits non-zero if any GLPI test fails — so
+        # the build itself IS the test. No load needed.
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: .
+          target: tester
+          platforms: linux/amd64
+          push: false
+          cache-from: type=gha,scope=tester
+          cache-to: type=gha,scope=tester,mode=max

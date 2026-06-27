@@ -1,0 +1,13 @@
+failure-threshold: warning
+
+ignored:
+  # DL3008 — pinning APK packages adds maintenance overhead; we accept the
+  # tradeoff and rely on the daily rebuild + Trivy scan.
+  - DL3008
+  # DL3018 — same reasoning for "Pin versions in apk add".
+  - DL3018
+
+trustedRegistries:
+  - docker.io
+  - ghcr.io
+  - mcr.microsoft.com

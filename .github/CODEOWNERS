@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Netresearch DTT GmbH
+#
+# CODEOWNERS for glpi-docker-compose-stack
+# These owners are auto-requested for review on PRs touching matching paths.
+# Reference: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-security/customizing-your-repository/about-code-owners
+
+# Default owners for everything in the repo
+* @netresearch/devops
+
+# Documentation
+*.md             @netresearch/devops
+docs/            @netresearch/devops
+README.md        @netresearch/devops
+CHANGELOG.md     @netresearch/devops
+
+# Security-sensitive surfaces
+Dockerfile               @netresearch/devops @netresearch/security
+compose.yml              @netresearch/devops @netresearch/security
+.github/workflows/       @netresearch/devops
+.github/branch-protection.json @netresearch/devops
+config/                  @netresearch/devops @netresearch/security
+rootfs/                  @netresearch/devops @netresearch/security
+.glpi-version        @netresearch/devops
+renovate.json            @netresearch/devops

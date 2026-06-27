@@ -1,0 +1,261 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Netresearch DTT GmbH
+
+# compose.bugsink.yml — self-hosted error tracking overlay
+#
+# Usage:
+#   docker compose -f compose.yml -f examples/compose.bugsink.yml up -d
+#
+# Adds two services to the glpi stack:
+#   - bugsink     — bugsink/bugsink:2.2.1, SQLite-backed (single-file
+#                   storage on the bugsink-data volume), accessible only
+#                   on the internal `glpi` network by default
+#   - bugsink-init — one-shot init container that seeds a "glpi"
+#                   team + project in Bugsink and emits the resulting
+#                   DSN into the bugsink-dsn volume. The glpi `app`
+#                   and `worker` containers then read it via
+#                   SENTRY_LARAVEL_DSN_FILE (entrypoint.sh's existing
+#                   *_FILE secrets shim).
+#
+# After bring-up the glpi app + worker auto-pick the DSN — no
+# manual copy step. Re-runs are idempotent (get_or_create on team /
+# project).
+#
+# -------------------------------------------------------------------------
+# How to reach the Bugsink UI
+# -------------------------------------------------------------------------
+# By default Bugsink listens only on the internal compose network. To
+# access the UI, layer one of:
+#
+#   A) examples/compose.traefik.yml — add a Traefik label to route
+#      bugsink.${SNIPEIT_HOST} (see README for the matching label snippet).
+#
+#   B) examples/compose.caddy.yml — analogous Caddyfile entry.
+#
+#   C) Quick local access without TLS:
+#        docker compose exec bugsink wget -qO- http://localhost:8000/
+#      or temporarily add `ports: ["9000:8000"]` under the bugsink
+#      service in this overlay (won't be committed).
+#
+# -------------------------------------------------------------------------
+# Required env vars (set in .env)
+# -------------------------------------------------------------------------
+#   BUGSINK_SECRET_KEY        # openssl rand -base64 50
+#   BUGSINK_ADMIN_EMAIL       # e.g. ops@example.com
+#   BUGSINK_ADMIN_PASSWORD    # initial admin password (rotate after login)
+#                             #   must NOT contain ':' — CREATE_SUPERUSER
+#                             #   uses 'email:password' as delimiter
+#                             #   AFTER rotating via UI, clear this var:
+#                             #     ./bin/env-set.sh BUGSINK_ADMIN_PASSWORD ""
+#
+# Optional:
+#   BUGSINK_PUBLIC_URL        # external URL when fronted by a reverse
+#                             # proxy with TLS, e.g.
+#                             # https://bugsink.example.com — bugsink uses
+#                             # this in email links / UI canonical URLs.
+#                             # The DSN written for glpi ALWAYS uses
+#                             # the internal http://bugsink:8000 so the
+#                             # app/worker reach bugsink directly on the
+#                             # compose network.
+#   BUGSINK_BEHIND_HTTPS_PROXY # "true" ONLY when fronted by a proxy that
+#                              # STRIPS client-supplied X-Forwarded-*
+#                              # headers (Traefik does this by default;
+#                              # Caddy needs `trusted_proxies` configured).
+#                              # Default "false".
+
+# Re-declare the logging anchor — YAML anchors don't survive overlays, so
+# `*logging` from compose.yml isn't reachable here. Same defaults: bounded
+# json-file logs so a noisy Bugsink instance can't fill the host disk.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  bugsink:
+    image: bugsink/bugsink:2.2.1
+    restart: unless-stopped
+    mem_limit: 512m
+    cpus: 1.0
+    logging: *logging
+    # Match the hardening posture of every other service in compose.yml.
+    # USER bugsink is baked into the image; no setuid happens at runtime,
+    # so we don't need CHOWN/SETUID/SETGID. Gunicorn binds port 8000
+    # (>1024) so CAP_NET_BIND_SERVICE isn't needed either.
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    environment:
+      # SQLite path inside the data volume. Bugsink only enables SQLite
+      # when DATABASE_URL is UNSET (any value falls back to DATABASE_URL
+      # parsing which only accepts mysql:// or postgres://). The
+      # DATABASE_PATH override lets us pick the file location.
+      DATABASE_PATH: "/data/bugsink.sqlite3"
+      SECRET_KEY: "${BUGSINK_SECRET_KEY:?BUGSINK_SECRET_KEY is required — generate with openssl rand -base64 50}"
+      # CREATE_SUPERUSER is idempotent on restart (Bugsink no-ops if a
+      # superuser already exists). Rotate the password via the UI after
+      # first login.
+      CREATE_SUPERUSER: "${BUGSINK_ADMIN_EMAIL:?BUGSINK_ADMIN_EMAIL is required}:${BUGSINK_ADMIN_PASSWORD:?BUGSINK_ADMIN_PASSWORD is required}"
+      # BUGSINK_PUBLIC_URL is what Bugsink puts in email links / UI canonical
+      # URLs — set this to your reverse-proxied URL when fronting with Traefik
+      # or Caddy. The DSN written into /run/bugsink-dsn for glpi always
+      # uses the internal http://bugsink:8000 (see bugsink-init below) so
+      # glpi can reach Bugsink directly on the compose network without
+      # round-tripping through the proxy.
+      BASE_URL: "${BUGSINK_PUBLIC_URL:-http://bugsink:8000}"
+      BEHIND_HTTPS_PROXY: "${BUGSINK_BEHIND_HTTPS_PROXY:-false}"
+      PORT: "8000"
+    volumes:
+      - bugsink-data:/data
+    healthcheck:
+      # Bugsink's own healthcheck pattern (from upstream sample). We
+      # rely on the same `python -c 'requests'` probe so behaviour
+      # tracks upstream releases without us re-deriving the path.
+      test: ["CMD-SHELL", "python -c 'import requests; requests.get(\"http://localhost:8000/\").raise_for_status()'"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    networks: [glpi]
+
+  # One-shot DSN seeder. Runs once Bugsink is healthy, idempotently
+  # ensures a "glpi" team + project exist for the configured admin
+  # user, then writes the project DSN into a shared volume that
+  # glpi's `app` and `worker` services read via *_FILE.
+  #
+  # Runs as root because Docker creates fresh named-volume mount points
+  # with root ownership; the bugsink user (uid 14237) otherwise can't
+  # write to /dsn on first bring-up. Touching the SQLite DB as root is
+  # safe: SQLite's robust_chown (built in since 3.17.0; image ships
+  # 3.46.1) explicitly chowns any newly-created -wal/-shm files to match
+  # the existing DB file's owner. So even if init creates the WAL/SHM
+  # files (which only happens if bugsink-web hasn't already done a
+  # write), the bugsink-user web container can still write to them
+  # afterwards.
+  #
+  # cap_drop: [ALL] keeps the "root in a no-cap container" surface tiny
+  # — root in a no-cap container is essentially userspace-root and can't
+  # do much beyond filesystem ops on what's mounted.
+  bugsink-init:
+    image: bugsink/bugsink:2.2.1
+    restart: "no"
+    user: "0"
+    mem_limit: 256m
+    cpus: 0.5
+    logging: *logging
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER]
+    depends_on:
+      bugsink:
+        condition: service_healthy
+    environment:
+      # MUST match the web container's database location so the init
+      # script sees the same SQLite DB.
+      DATABASE_PATH: "/data/bugsink.sqlite3"
+      SECRET_KEY: "${BUGSINK_SECRET_KEY:?BUGSINK_SECRET_KEY is required}"
+      # ALWAYS the internal URL — the DSN must be reachable from glpi
+      # `app`/`worker` on the compose network. If we used BUGSINK_PUBLIC_URL
+      # (which an operator may set to https://bugsink.example.com behind a
+      # proxy), the DSN's host part would point outside the compose
+      # network and glpi couldn't reach it without round-tripping.
+      BASE_URL: "http://bugsink:8000"
+      # Used by the init script to pick the right superuser (operators
+      # may add more later via the UI; we must pin to the seeded admin).
+      BUGSINK_ADMIN_EMAIL: "${BUGSINK_ADMIN_EMAIL:?BUGSINK_ADMIN_EMAIL is required}"
+    volumes:
+      - bugsink-data:/data
+      - bugsink-dsn:/dsn
+    working_dir: /app
+    # Idempotent Django-shell seeder. Uses get_or_create everywhere so
+    # repeat invocations are safe. Bugsink's CREATE_SUPERUSER bootstrap
+    # is guaranteed to have run by the time `bugsink` is healthy, so a
+    # superuser exists.
+    command:
+      - sh
+      - -c
+      - |
+        set -eu
+        echo "[bugsink-init] seeding glpi team + project"
+        bugsink-manage shell -c "
+        import os
+        from django.contrib.auth import get_user_model
+        from teams.models import Team, TeamMembership, TeamRole
+        from projects.models import Project, ProjectMembership, ProjectRole
+
+        User = get_user_model()
+        admin_email = os.environ['BUGSINK_ADMIN_EMAIL']
+        admin = (User.objects.filter(email=admin_email)
+                              .order_by('pk').first()
+                 or User.objects.filter(is_superuser=True)
+                                .order_by('pk').first())
+        if not admin:
+            raise SystemExit(
+                'No superuser found; CREATE_SUPERUSER did not seed admin')
+
+        team, _ = Team.objects.get_or_create(name='glpi')
+        TeamMembership.objects.get_or_create(
+            team=team, user=admin,
+            defaults={'role': TeamRole.ADMIN, 'accepted': True},
+        )
+        project, _ = Project.objects.get_or_create(
+            slug='glpi',
+            defaults={'name': 'glpi', 'team': team},
+        )
+        ProjectMembership.objects.get_or_create(
+            project=project, user=admin,
+            defaults={'role': ProjectRole.ADMIN, 'accepted': True},
+        )
+
+        with open('/dsn/glpi.dsn', 'w') as f:
+            f.write(project.dsn)
+        os.chmod('/dsn/glpi.dsn', 0o444)
+        print('DSN written to /dsn/glpi.dsn')
+        "
+    networks: [glpi]
+
+  # Make the glpi `app` and `worker` services read the auto-seeded
+  # DSN. Both services already understand SENTRY_LARAVEL_DSN_FILE
+  # because entrypoint.sh's *_FILE shim is extended for this overlay.
+  app:
+    depends_on:
+      # service_completed_successfully — the init container exits 0
+      # once the DSN is written. app waits so the file exists at boot.
+      bugsink-init:
+        condition: service_completed_successfully
+      # Preserve the original app dependencies from compose.yml. Compose
+      # merges depends_on by service-name, so we restate them.
+      db:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+    environment:
+      SENTRY_LARAVEL_DSN_FILE: /run/bugsink-dsn/glpi.dsn
+    volumes:
+      - bugsink-dsn:/run/bugsink-dsn:ro
+
+  worker:
+    depends_on:
+      bugsink-init:
+        condition: service_completed_successfully
+      db:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+      app:
+        condition: service_healthy
+    environment:
+      SENTRY_LARAVEL_DSN_FILE: /run/bugsink-dsn/glpi.dsn
+    volumes:
+      - bugsink-dsn:/run/bugsink-dsn:ro
+
+volumes:
+  bugsink-data:
+    # SQLite database + Bugsink's local object storage. Back this up
+    # alongside the glpi app-data volume.
+  bugsink-dsn:
+    # Shared file-secret volume — bugsink-init writes the DSN here as
+    # root (see the bugsink-init service block for why), glpi app +
+    # worker read it via the read-only mount + entrypoint *_FILE shim.
+    # Single tiny text file; persists across stack restarts so app/worker
+    # can start before bugsink-init has re-run.

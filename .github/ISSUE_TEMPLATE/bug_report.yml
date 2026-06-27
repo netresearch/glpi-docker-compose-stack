@@ -1,0 +1,135 @@
+# SPDX-License-Identifier: CC-BY-SA-4.0
+# Copyright (c) 2026 Netresearch DTT GmbH
+---
+name: Bug Report
+description: Report a bug or unexpected behavior in the GLPI Docker Compose stack
+title: "[BUG] "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug in the
+        **GLPI Docker Compose Stack**.
+
+        Before submitting, please:
+
+        - Check the
+          [day-2 ops runbook](https://github.com/netresearch/glpi-docker-compose-stack/blob/main/docs/runbook-day2-ops.md)
+          and the
+          [restore runbook](https://github.com/netresearch/glpi-docker-compose-stack/blob/main/docs/runbook-restore.md).
+        - Search [existing issues](https://github.com/netresearch/glpi-docker-compose-stack/issues?q=is%3Aissue) to avoid duplicates.
+        - For suspected **security vulnerabilities**, do NOT open a public issue.
+          Use the
+          [private security advisory](https://github.com/netresearch/glpi-docker-compose-stack/security/advisories/new)
+          instead.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: A clear and concise description of the bug.
+      placeholder: When I run `docker compose up`, the `app` service exits with code 1...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: image-tag
+    attributes:
+      label: Image tag / variant
+      description: Which image variant of `ghcr.io/netresearch/glpi-php-fpm` (or the local build) are you running?
+      options:
+        - "latest (rolling stable)"
+        - "rolling"
+        - "8.5.0 (current pin in .glpi-version)"
+        - "master (upstream)"
+        - "develop (upstream)"
+        - "local build via `docker buildx bake`"
+        - "other (please describe in Additional Context)"
+    validations:
+      required: true
+
+  - type: input
+    id: docker-version
+    attributes:
+      label: Docker version
+      description: "Output of `docker version --format '{{.Server.Version}}'` (or full `docker version`)."
+      placeholder: "27.3.1"
+    validations:
+      required: true
+
+  - type: input
+    id: compose-version
+    attributes:
+      label: Docker Compose version
+      description: "Output of `docker compose version --short`."
+      placeholder: "2.39.4"
+    validations:
+      required: true
+
+  - type: input
+    id: host-os
+    attributes:
+      label: Host OS and architecture
+      placeholder: "Ubuntu 24.04 LTS, amd64"
+    validations:
+      required: true
+
+  - type: textarea
+    id: compose-ps
+    attributes:
+      label: "`docker compose ps --format json` output"
+      description: Paste the full output. Helps us see which containers crashed, restarted, or never came up.
+      render: json
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Numbered list, please. Include the exact commands you ran.
+      placeholder: |
+        1. `cp .env.example .env`
+        2. `docker compose up -d`
+        3. Wait ~30s, then visit http://localhost:8000
+        4. See 502 Bad Gateway
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual-vs-expected
+    attributes:
+      label: Actual vs expected behavior
+      description: What did you see, and what did you expect?
+      placeholder: |
+        **Expected:** GLPI installer screen at http://localhost:8000
+        **Actual:** nginx 502; `app` container in restart loop.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: "`docker compose logs --tail 200 app web db` (sanitize any secrets first)."
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: trivy-sarif
+    attributes:
+      label: "Trivy / SARIF / SBOM output (optional)"
+      description: If this bug is security-flavored, paste relevant Trivy, SARIF, or SBOM findings here.
+      render: text
+    validations:
+      required: false
+
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional context
+      description: Override files, custom env vars, network setup, reverse proxy, etc.
+    validations:
+      required: false

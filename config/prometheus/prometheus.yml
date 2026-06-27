@@ -1,0 +1,42 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Netresearch DTT GmbH
+
+# prometheus.yml — minimal scrape config for the glpi observability overlay
+#
+# Scrapes:
+#   - php-fpm-exporter on :9253 (php-fpm pool stats via unix socket)
+#   - nginx-prometheus-exporter on :9113 (nginx stub_status — requires
+#     /stub_status to be enabled in nginx; see compose.observability.yml)
+#   - prometheus itself on :9090 (self-monitoring)
+#
+# All targets live on the `glpi` docker network and are reached by their
+# compose service name. No remote_write, no alerting — this file is the
+# floor for adding Grafana, Alertmanager, or remote storage in a separate
+# overlay.
+
+global:
+  scrape_interval: 30s
+  scrape_timeout: 10s
+  evaluation_interval: 30s
+  external_labels:
+    stack: glpi
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets:
+          - localhost:9090
+
+  - job_name: php-fpm
+    static_configs:
+      - targets:
+          - php-fpm-exporter:9253
+        labels:
+          service: glpi-app
+
+  - job_name: nginx
+    static_configs:
+      - targets:
+          - nginx-prometheus-exporter:9113
+        labels:
+          service: glpi-web

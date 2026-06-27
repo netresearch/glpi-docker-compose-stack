@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Netresearch DTT GmbH
+---
+blank_issues_enabled: false
+contact_links:
+  - name: Security Vulnerability (private disclosure)
+    url: https://github.com/netresearch/glpi-docker-compose-stack/security/advisories/new
+    about: Report security vulnerabilities privately via GitHub Security Advisories. Do NOT use public issues.
+  - name: Netresearch organization SECURITY policy
+    url: https://github.com/netresearch/.github/blob/main/SECURITY.md
+    about: Organization-wide security disclosure process (inherited by this repo).
+  - name: GLPI upstream issues
+    url: https://github.com/grokability/glpi/issues
+    about: Bugs in the GLPI application itself (not the Docker stack) belong upstream.
+  - name: GLPI documentation
+    url: https://glpi.readme.io/
+    about: Official GLPI user and administrator documentation.
+  - name: Day-2 ops runbook
+    url: https://github.com/netresearch/glpi-docker-compose-stack/blob/main/docs/runbook-day2-ops.md
+    about: Common operational tasks (logs, restarts, backups, restore drills).

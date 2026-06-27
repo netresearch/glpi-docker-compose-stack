@@ -1,0 +1,41 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Netresearch DTT GmbH
+#
+# Caddyfile — reverse-proxy GLPI with automatic TLS.
+#
+# Caddy handles all of the following transparently, no extra config needed:
+#   - HTTP -> HTTPS redirect on port 80
+#   - Certificate issuance + renewal via Let's Encrypt (ACME HTTP-01 or
+#     TLS-ALPN-01 challenge — requires ports 80 + 443 reachable from the
+#     public internet, and SNIPEIT_HOST resolving via public DNS)
+#   - OCSP stapling
+#   - Modern TLS defaults (TLS 1.2+, sane cipher suites)
+#
+# The `{$SNIPEIT_HOST}` placeholder is substituted at container start from
+# the env var passed by compose.caddy.yml (sourced from .env).
+#
+# For staging / wildcard certs / DNS-01 challenges, see:
+#   https://caddyserver.com/docs/automatic-https
+
+{$SNIPEIT_HOST} {
+	# Forward all traffic to the nginx `web` service over the shared docker
+	# network. `web` listens on port 80 inside the network.
+	reverse_proxy web:80
+
+	# Send Caddy's own logs to stdout in JSON so `docker compose logs caddy`
+	# is greppable and ingestible by log shippers.
+	log {
+		output stdout
+		format json
+	}
+
+	# Modest security headers. GLPI's own nginx already sets most of
+	# these; Caddy re-asserts HSTS + X-Content-Type-Options at the edge so
+	# they're present even if the upstream config drifts.
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		X-Content-Type-Options "nosniff"
+		# Remove the Server header Caddy adds — defense in depth.
+		-Server
+	}
+}

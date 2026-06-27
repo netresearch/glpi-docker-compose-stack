@@ -1,0 +1,157 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Netresearch DTT GmbH
+
+# compose.observability.yml — Prometheus + exporters overlay
+#
+# Usage:
+#   docker compose -f compose.yml -f examples/compose.observability.yml up -d
+#
+# Adds three services to the glpi stack:
+#   - php-fpm-exporter (:9253) — scrapes php-fpm via the shared unix socket;
+#     the /fpm-status endpoint is already enabled by rootfs's zz-glpi.conf
+#   - nginx-prometheus-exporter (:9113) — scrapes nginx /stub_status
+#   - prometheus (:9090) — scrapes the two exporters + itself
+#
+# This overlay is intentionally minimal. Grafana, Alertmanager, Loki,
+# remote_write, and PromQL alert rules belong in a separate overlay so an
+# operator can mix and match.
+#
+# -------------------------------------------------------------------------
+# nginx /stub_status caveat — READ BEFORE STARTING THIS OVERLAY
+# -------------------------------------------------------------------------
+# The default nginx config in this repo does NOT expose /stub_status, so the
+# nginx-prometheus-exporter will report "down" until you opt in. Two options:
+#
+#   A) Enable stub_status (recommended). Add this to
+#      `config/nginx/conf.d/default.conf` inside the `server { ... }` block:
+#
+#        location = /stub_status {
+#            stub_status;
+#            access_log off;
+#            allow 127.0.0.1;
+#            allow 172.16.0.0/12;   # docker bridge networks
+#            deny all;
+#        }
+#
+#      Reload nginx (`docker compose restart web`) and the exporter will
+#      start returning metrics.
+#
+#   B) Skip nginx metrics. Comment out the `nginx-prometheus-exporter`
+#      service below AND remove the `nginx` job from
+#      `config/prometheus/prometheus.yml`.
+# -------------------------------------------------------------------------
+
+services:
+  # ---------------------------------------------------------------------
+  # php-fpm exporter — reads pool stats via the shared unix socket
+  # ---------------------------------------------------------------------
+  php-fpm-exporter:
+    image: hipages/php-fpm_exporter:2
+    restart: unless-stopped
+    mem_limit: 64m
+    cpus: 0.25
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    depends_on:
+      app:
+        condition: service_healthy
+    environment:
+      # The exporter speaks FastCGI directly to the pool's status page.
+      # Format: <socket>;<status-path>  — both must match zz-glpi.conf
+      # (listen=/run/php-fpm/glpi.sock, pm.status_path=/fpm-status).
+      PHP_FPM_SCRAPE_URI: "unix:///run/php-fpm/glpi.sock;/fpm-status"
+      PHP_FPM_WEB_LISTEN_ADDRESS: ":9253"
+      PHP_FPM_LOG_LEVEL: "info"
+    volumes:
+      # Read-only mount of the same tmpfs volume `app` writes the socket to.
+      # The socket is mode 0666 (see zz-glpi.conf) so the exporter's
+      # non-root uid can connect() even though the volume is :ro.
+      - fpm-sock:/run/php-fpm:ro
+    # NOTE: image is distroless (no shell, no wget/curl) — no healthcheck.
+    # Prometheus's `up` metric serves as the liveness signal instead.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    networks:
+      - glpi
+
+  # ---------------------------------------------------------------------
+  # nginx exporter — scrapes /stub_status (see caveat at top of file)
+  # ---------------------------------------------------------------------
+  nginx-prometheus-exporter:
+    image: nginx/nginx-prometheus-exporter:1.5
+    restart: unless-stopped
+    mem_limit: 64m
+    cpus: 0.25
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    depends_on:
+      web:
+        condition: service_healthy
+    command:
+      - --nginx.scrape-uri=http://web/stub_status
+      - --web.listen-address=:9113
+    # NOTE: image is distroless — no healthcheck.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    networks:
+      - glpi
+
+  # ---------------------------------------------------------------------
+  # Prometheus — TSDB + scrape engine
+  # ---------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v3.5.3
+    restart: unless-stopped
+    mem_limit: 512m
+    cpus: 1.0
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    depends_on:
+      php-fpm-exporter:
+        condition: service_started
+      nginx-prometheus-exporter:
+        condition: service_started
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+      - --web.console.libraries=/usr/share/prometheus/console_libraries
+      - --web.console.templates=/usr/share/prometheus/consoles
+      - --web.enable-lifecycle
+    volumes:
+      - ./config/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prom-data:/prometheus
+    ports:
+      - "${PROMETHEUS_HTTP_PORT:-9090}:9090"
+    healthcheck:
+      # prom/prometheus is built on busybox — wget is available.
+      test: ["CMD", "wget", "-qO-", "--spider", "http://127.0.0.1:9090/-/healthy"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    networks:
+      - glpi
+
+volumes:
+  prom-data:
+    name: glpi-prom-data

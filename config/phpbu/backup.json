@@ -1,0 +1,84 @@
+{
+  "verbose": true,
+  "logging": [
+    { "type": "json", "target": "/backups/phpbu.log" }
+  ],
+  "_alerting_comment": [
+    "Failure alerting is intentionally not wired here: GLPI configures SMTP in",
+    "the UI (Setup > Notifications), not via env, so the backup container has no",
+    "mail creds by default. To get failure emails, add a `mail` logger block",
+    "with adapter:env:* SMTP options and pass those vars into the `backup`",
+    "service in compose.yml.",
+    "",
+    "Retention (phpbu's `cleanup` is one strategy per backup — capacity OR",
+    "outdated, not both):",
+    "  glpi-db     — capacity 5G   (drop oldest dumps once the total exceeds 5 GiB)",
+    "  glpi-files  — outdated 30D  (remove archives older than 30 days)",
+    "  glpi-config — outdated 90D  (kept longer: tiny, and holds glpicrypt.key —",
+    "                the AES key without which encrypted DB fields are unreadable)",
+    "",
+    "Underscore-prefixed root keys are ignored by phpbu's loader — this block is",
+    "documentation only."
+  ],
+  "backups": [
+    {
+      "name": "glpi-db",
+      "source": {
+        "type": "mysqldump",
+        "options": {
+          "host": "adapter:env:DB_HOST",
+          "databases": "adapter:env:DB_DATABASE",
+          "user": "adapter:env:DB_USER",
+          "password": "adapter:env:DB_PASSWORD",
+          "singleTransaction": "true",
+          "quick": "true"
+        }
+      },
+      "target": {
+        "dirname": "/backups/db",
+        "filename": "glpi-db-%Y%m%d-%H%i%s.sql",
+        "compress": "gzip"
+      },
+      "cleanup": {
+        "type": "capacity",
+        "options": { "size": "5G" }
+      }
+    },
+    {
+      "name": "glpi-files",
+      "source": {
+        "type": "tar",
+        "options": {
+          "path": "/snapshot/files"
+        }
+      },
+      "target": {
+        "dirname": "/backups/files",
+        "filename": "glpi-files-%Y%m%d-%H%i%s.tar",
+        "compress": "gzip"
+      },
+      "cleanup": {
+        "type": "outdated",
+        "options": { "older": "30D" }
+      }
+    },
+    {
+      "name": "glpi-config",
+      "source": {
+        "type": "tar",
+        "options": {
+          "path": "/snapshot/config"
+        }
+      },
+      "target": {
+        "dirname": "/backups/config",
+        "filename": "glpi-config-%Y%m%d-%H%i%s.tar",
+        "compress": "gzip"
+      },
+      "cleanup": {
+        "type": "outdated",
+        "options": { "older": "90D" }
+      }
+    }
+  ]
+}

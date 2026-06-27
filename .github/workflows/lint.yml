@@ -1,0 +1,141 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Netresearch DTT GmbH
+#
+# Static checks for the glpi-docker-compose-stack repo.
+#
+# Splits into:
+#   - container-lint  → delegates Dockerfile (hadolint) + shellcheck on shipped
+#                       scripts to netresearch/.github's reusable
+#                       lint-container.yml on @main. Reusable pins hadolint to
+#                       v2.14.0, which handles Docker 25's HEALTHCHECK
+#                       --start-interval correctly. (Earlier v2.12.0 pin was a
+#                       bug — see netresearch/.github#141 + a4a763e.)
+#   - compose-validate → stays inline. Validates docker compose config with
+#                        repo-specific .env.example placeholder substitution
+#                        (caller-specific shape that doesn't generalise).
+#   - overlay-hardening → stays inline. Calls tests/lint/hardening-check.sh
+#                        to enforce security_opt:[no-new-privileges:true] +
+#                        cap_drop:[ALL] on every long-running service that
+#                        an examples/compose.*.yml overlay introduces.
+#                        Background: PR #21's audit caught the Bugsink
+#                        overlay initially shipping without hardening
+#                        because compose anchors don't survive overlays.
+#   - yamllint         → stays inline. The repo has no .yamllint.yml config
+#                        file; rules are passed via config_data here to keep
+#                        the contract local.
+#   - bats             → regression suite for bin/env-set.sh +
+#                        bin/compose-file.sh under tests/bin/. Uses
+#                        bats-core/bats-action to install bats + bats-support
+#                        + bats-assert on the runner; failures block PRs.
+
+name: lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  container-lint:
+    # hadolint (always) + shellcheck (because shell-scandirs is set).
+    uses: netresearch/.github/.github/workflows/lint-container.yml@main
+    permissions:
+      contents: read
+    with:
+      shell-scandirs: ./rootfs/usr/local/bin ./bin
+
+  compose-validate:
+    name: docker compose config
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Validate compose.yml
+        run: |
+          cp .env.example .env
+          # supply just-good-enough placeholders so validation passes
+          sed -i \
+            -e 's/^APP_KEY=$/APP_KEY=base64:CI_PLACEHOLDER_KEY_NOT_FOR_RUNTIME_USE_ONLY===/' \
+            -e 's/^DB_PASSWORD=$/DB_PASSWORD=ci-placeholder/' \
+            -e 's/^DB_ROOT_PASSWORD=$/DB_ROOT_PASSWORD=ci-placeholder/' \
+            .env
+          docker compose config --quiet
+          docker compose -f compose.yml config --quiet
+
+  overlay-hardening:
+    name: overlay hardening
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Install yq (mikefarah)
+        # The ubuntu-latest runner already has docker compose v2; some images
+        # also ship a yq, but version + flavour (mikefarah vs kislyuk) vary.
+        # Pin a specific mikefarah release for reproducibility — the script
+        # only uses portable v4 syntax (// fallback, @tsv, map/any).
+        run: |
+          set -eu
+          YQ_VERSION=v4.53.2
+          # SHA256 of yq_linux_amd64 v4.53.2 (verified manually 2026-05-25
+          # via sha256sum on the published binary; mikefarah/yq's published
+          # `checksums` file mixes algorithms in a single column so we can't
+          # parse it programmatically here).
+          YQ_SHA256=d56bf5c6819e8e696340c312bd70f849dc1678a7cda9c2ad63eebd906371d56b
+          tmp=$(mktemp)
+          curl -fsSL \
+            "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64" \
+            -o "$tmp"
+          actual=$(sha256sum "$tmp" | awk '{print $1}')
+          if [ "$actual" != "$YQ_SHA256" ]; then
+            echo "yq checksum mismatch: expected $YQ_SHA256, got $actual" >&2
+            exit 1
+          fi
+          sudo install -m 0755 "$tmp" /usr/local/bin/yq
+          rm -f "$tmp"
+          yq --version
+      - name: Check overlay hardening
+        run: ./tests/lint/hardening-check.sh
+
+  yamllint:
+    name: yamllint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: ibiqlik/action-yamllint@2576378a8e339169678f9939646ee3ee325e845c # v3
+        with:
+          file_or_dir: .github/workflows .hadolint.yaml compose.yml compose.override.yml.example examples/
+          config_data: |
+            extends: default
+            rules:
+              line-length: disable
+              document-start: disable
+              truthy:
+                check-keys: false
+              comments:
+                min-spaces-from-content: 1
+
+  bats:
+    name: bats tests/bin
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      # Installs bats, bats-support, bats-assert under /usr/lib/bats-*.
+      # tests/bin/test_helper.bash sources support+assert from that path.
+      - uses: bats-core/bats-action@77d6fb60505b4d0d1d73e48bd035b55074bbfb43 # v4.0.0
+        with:
+          # detik + file are kubernetes/filesystem helpers we don't use.
+          detik-install: false
+          file-install: false
+      - name: Run regression suite
+        run: bats tests/bin/

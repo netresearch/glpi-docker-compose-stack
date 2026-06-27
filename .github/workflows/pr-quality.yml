@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Netresearch DTT GmbH
+#
+# PR Quality Gates — caller for the org-wide reusable workflow.
+# Provides:
+#   - PR size labeling (warn over 500 lines, alert over 1000)
+#   - Auto-approve for maintainer PRs (OWNER/MEMBER/COLLABORATOR), so
+#     branch-protection or Copilot-ruleset approval gates don't block
+#     trivial maintainer work; Copilot review still runs separately
+#     via the Copilot ruleset (not via this workflow).
+# Reusable: netresearch/.github/.github/workflows/pr-quality.yml
+
+name: PR Quality Gates
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions: {}
+
+jobs:
+  quality:
+    uses: netresearch/.github/.github/workflows/pr-quality.yml@main
+    with:
+      auto-approve-maintainers: true
+    permissions:
+      contents: read
+      pull-requests: write

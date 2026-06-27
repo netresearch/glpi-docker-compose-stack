@@ -1,0 +1,65 @@
+# SPDX-License-Identifier: CC-BY-SA-4.0
+# Copyright (c) 2026 Netresearch DTT GmbH
+---
+name: Feature Request
+description: Suggest an enhancement to the GLPI Docker Compose stack
+title: "[FEATURE] "
+labels: ["enhancement", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for proposing an improvement to the
+        **GLPI Docker Compose Stack**.
+
+        Note: this stack is intentionally opinionated. We will accept changes
+        that strengthen our default deployment, but bespoke configuration
+        knobs for one-off use cases may be declined. Override files
+        (`compose.override.yml`) are the right place for that.
+
+  - type: textarea
+    id: use-case
+    attributes:
+      label: Use case
+      description: What problem are you trying to solve? Who benefits, and how?
+      placeholder: |
+        "As an operator running this stack behind Traefik, I need ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed-implementation
+    attributes:
+      label: Proposed implementation (optional)
+      description: Sketch of how this could be built. Compose changes, new service, env vars, docs section, etc.
+    validations:
+      required: false
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What workarounds exist today? What did you try first?
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: tradeoffs
+    attributes:
+      label: Trade-off acknowledgment
+      description: Please confirm you have considered the cost of adding this.
+      options:
+        - label: I understand this proposal may increase image size, attack surface, or maintenance burden.
+          required: true
+        - label: I have considered whether this could live in a documented `compose.override.yml` pattern instead of being merged upstream.
+          required: true
+        - label: This is not a security vulnerability (those go through [private security advisories](https://github.com/netresearch/glpi-docker-compose-stack/security/advisories/new)).
+          required: true
+
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional context
+      description: Links, screenshots, mockups, related upstream GLPI issues.
+    validations:
+      required: false

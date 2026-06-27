@@ -1,0 +1,38 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Netresearch DTT GmbH
+#
+# OpenSSF Scorecard — supply-chain security health check.
+# Delegates to the org-wide reusable in netresearch/.github.
+# Runs weekly against main and uploads SARIF to GitHub code-scanning.
+# Results also surface on the OpenSSF Scorecard public dashboard
+# (https://securityscorecards.dev/) once enabled.
+
+name: scorecard
+
+on:
+  branch_protection_rule:
+  schedule:
+    - cron: '0 4 * * 1'   # weekly, Monday 04:00 UTC
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Top-level permissions explicitly enumerated (SonarCloud rule
+# githubactions:S8234). The reusable's job requests its own
+# additional permissions via its own permissions block; this minimum
+# lets supporting tooling read metadata without granting writes.
+permissions:
+  contents: read
+
+jobs:
+  analysis:
+    name: Scorecard analysis
+    permissions:
+      # required by scorecard-action for publishing results
+      security-events: write
+      # needed to publish results and get a badge
+      id-token: write
+      contents: read
+      # needed for nested API calls (Branch-Protection, Webhooks checks)
+      actions: read
+    uses: netresearch/.github/.github/workflows/scorecard.yml@main
