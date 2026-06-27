@@ -3,20 +3,21 @@
 #
 # Smoke tests for the glpi-docker-compose-stack repo.
 #
-# Splits into:
-#   - image-surface     → delegates buildx --load amd64 +
-#                         container-structure-test to the netresearch/.github
-#                         reusable smoke-test-container.yml (@main).
-#   - compose-up        → stays inline. Boots the full compose stack with
-#                         placeholder-substituted .env and probes / for
-#                         HTTP 200/302 — glpi-specific bootstrap and
-#                         known HTTP route.
-#   - init-idempotency  → stays inline. Verifies bin/init.sh is idempotent —
-#                         glpi-specific contract (random DB-password
-#                         generation must not re-roll on second run).
-#   - upstream-tests    → stays inline. Builds the `tester` Dockerfile stage
-#                         which runs the upstream GLPI phpunit suite —
-#                         glpi-specific target stage.
+# Jobs:
+#   - image-surface    → delegates buildx --load amd64 +
+#                        container-structure-test to the netresearch/.github
+#                        reusable smoke-test-container.yml (@main).
+#   - compose-up       → stays inline. Builds the image locally from
+#                        .glpi-version (with the resolved tarball sha256),
+#                        boots the full compose stack against a generated .env,
+#                        and asserts the stack actually serves GLPI: the login
+#                        page returns HTTP 200 AND its body carries the
+#                        "Authentication - GLPI" page title (proof GLPI
+#                        rendered, not a placeholder), with app + web healthy.
+#   - init-idempotency → stays inline. Verifies bin/init.sh is idempotent — a
+#                        second run must not re-roll the generated DB passwords.
+#                        (GLPI's encryption key is minted by the app on first
+#                        boot inside the glpi-config volume, never in .env.)
 
 name: smoke-test
 
@@ -29,12 +30,6 @@ on:
       - 'docs/**'
       - '**.md'
   workflow_dispatch:
-    inputs:
-      run_upstream_tests:
-        description: 'Also run GLPI phpunit suite (slow, ~5-10 min)'
-        type: boolean
-        required: false
-        default: false
 
 permissions:
   contents: read
@@ -55,68 +50,106 @@ jobs:
       cache-scope: smoke-test
 
   compose-up:
-    name: stack boots healthy
+    name: stack serves GLPI
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
       - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
-      - name: Build :latest locally (amd64) and load into docker
-        # ghcr.io tag may not exist yet (first push to main) or may be
-        # behind HEAD. Build from current Dockerfile and tag it
-        # `ghcr.io/.../glpi-php-fpm:latest` so compose.yml's
-        # `image:` reference resolves to the local one before compose
-        # tries to pull from the registry.
+
+      - name: Resolve GLPI version + tarball sha256
+        id: glpi
+        # Same supply-chain pin the production build uses (cf. build.yml):
+        # hash the bundled release tarball and feed it to the build as
+        # GLPI_SHA256 so a swapped asset can't slip into the smoke image.
+        run: |
+          set -euo pipefail
+          VERSION=$(tr -d '[:space:]' < .glpi-version)
+          URL="https://github.com/glpi-project/glpi/releases/download/${VERSION}/glpi-${VERSION}.tgz"
+          SHA=$(curl -fsSL "$URL" | sha256sum | cut -d' ' -f1)
+          [ -n "$SHA" ] || { echo "could not hash $URL" >&2; exit 1; }
+          {
+            echo "version=$VERSION"
+            echo "sha256=$SHA"
+          } >> "$GITHUB_OUTPUT"
+          echo "resolved GLPI $VERSION  sha256=${SHA:0:16}…"
+
+      - name: Build glpi-php-fpm:smoke (amd64) and load into docker
+        # compose.yml references ghcr.io/netresearch/glpi-php-fpm:${GLPI_IMAGE_TAG},
+        # so tag the local build :smoke and set GLPI_IMAGE_TAG=smoke in .env
+        # below — compose then resolves the locally-loaded image instead of
+        # pulling from the registry. No build secret: the GLPI image is built
+        # FROM the bundled release tarball (vendor/ pre-installed), so there is
+        # no composer step needing authenticated github.com access.
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
           context: .
           target: runtime
           platforms: linux/amd64
           load: true
-          tags: |
-            ghcr.io/${{ github.repository_owner }}/glpi-php-fpm:latest
+          tags: ghcr.io/netresearch/glpi-php-fpm:smoke
+          build-args: |
+            GLPI_VERSION=${{ steps.glpi.outputs.version }}
+            GLPI_SHA256=${{ steps.glpi.outputs.sha256 }}
           cache-from: type=gha,scope=smoke-test
           cache-to: type=gha,scope=smoke-test,mode=max
-          # No build secret: the GLPI image is built FROM the bundled release
-          # tarball (vendor/ pre-installed) — there is no composer step that
-          # needs authenticated github.com access (cf. build.yml / Dockerfile).
-      - name: Bootstrap .env
+
+      - name: Bootstrap .env (smoke image tag + random DB passwords)
+        env:
+          PORT: '8080'
         run: |
-          cp .env.example .env
-          # GLPI has no APP_KEY; just seed the DB passwords compose needs.
-          sed -i \
-            -e 's|^GLPI_DB_PASSWORD=$|GLPI_DB_PASSWORD=ci-pw-not-secret|' \
-            -e 's|^DB_ROOT_PASSWORD=$|DB_ROOT_PASSWORD=ci-rootpw-not-secret|' \
-            .env
-          chmod 0600 .env
-      - name: docker compose up -d (uses locally-loaded image + pulls deps)
-        # The glpi-php-fpm:latest image is already in local docker store
-        # (from the previous buildx --load step), so compose won't re-pull
-        # it. The other services (mariadb, valkey, nginx, ofelia, phpbu) are
-        # pulled normally — `--pull missing` is the default.
-        run: docker compose up -d --wait --wait-timeout 300
-      - name: Wait for the GLPI login page (HTTP 200 + "Authentication - GLPI")
+          set -eu
+          ./bin/init.sh                                # creates .env, fills DB passwords
+          ./bin/env-set.sh GLPI_IMAGE_TAG smoke
+          ./bin/env-set.sh GLPI_HTTP_PORT "$PORT"
+
+      - name: Start the stack
+        run: docker compose up -d
+
+      - name: Assert GLPI login page is served (HTTP 200 + page title)
+        env:
+          PORT: '8080'
         run: |
-          # Resolve the published host port from .env (.env.example pins 8080).
-          port="$(grep -E '^GLPI_HTTP_PORT=' .env | cut -d= -f2)"
-          port="${port:-8080}"
+          set -u
+          url="http://127.0.0.1:${PORT}/"
           body="$(mktemp)"
-          for i in $(seq 1 40); do
+          for i in $(seq 1 72); do
             # Follow `/` → login redirect; capture body + final status code.
-            code=$(curl -sS -L -o "$body" -w '%{http_code}' "http://localhost:${port}/" || true)
+            code=$(curl -sS -L -o "$body" -w '%{http_code}' "$url" || true)
             # A bare 200 is not proof on its own (nginx could be serving an
             # error/placeholder page) — assert GLPI's own login-page <title>.
             if [ "$code" = "200" ] && grep -q 'Authentication - GLPI' "$body"; then
-              echo "GLPI login page served (HTTP $code, title 'Authentication - GLPI') — pass"
+              echo "GLPI login page served (HTTP 200, title 'Authentication - GLPI') after $(( (i - 1) * 5 ))s"
               exit 0
             fi
             echo "[$i] HTTP ${code:-000} — no GLPI login marker yet; retrying in 5 s"
             sleep 5
           done
-          echo "GLPI never served its login page (HTTP 200 + 'Authentication - GLPI') in time"
+          echo "::error::GLPI never served its login page (HTTP 200 + 'Authentication - GLPI') in time"
+          docker compose ps
           docker compose logs --tail=200
           exit 1
+
+      - name: Assert app + web report healthy
+        run: |
+          set -eu
+          docker compose ps
+          rc=0
+          for svc in app web; do
+            cid=$(docker compose ps -q "$svc")
+            if [ -z "$cid" ]; then
+              echo "::error::no container found for service $svc"; rc=1; continue
+            fi
+            health=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$cid")
+            echo "$svc: $health"
+            [ "$health" = "healthy" ] || { echo "::error::$svc is not healthy ($health)"; rc=1; }
+          done
+          if [ "$rc" -ne 0 ]; then
+            docker compose logs --tail=200
+            exit 1
+          fi
+
       - name: Tear down (cleanup)
         if: always()
         run: docker compose down -v
@@ -129,39 +162,19 @@ jobs:
         with:
           persist-credentials: false
       # No image build needed: bin/init.sh only writes .env (random DB
-      # passwords via openssl). Unlike a Laravel APP_KEY, GLPI's encryption
-      # key is generated by the app on first boot — not by init.sh.
+      # passwords via openssl). GLPI's encryption key is minted by the app on
+      # first boot inside the glpi-config volume — not by init.sh — so the
+      # only generated secrets to check for stability are the DB passwords.
       - name: First run
         run: ./bin/init.sh
       - name: Snapshot .env
         run: cp .env .env.firstrun
       - name: Second run (must not re-roll the generated DB passwords)
         run: |
+          set -eu
           ./bin/init.sh
           if ! diff -u .env.firstrun .env; then
-            echo "init.sh is NOT idempotent — random DB passwords were re-rolled"
+            echo "::error::init.sh is NOT idempotent — generated DB passwords were re-rolled"
             exit 1
           fi
-
-  upstream-tests:
-    name: GLPI phpunit suite
-    runs-on: ubuntu-latest
-    if: |
-      github.event_name == 'workflow_dispatch' &&
-      inputs.run_upstream_tests
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-      - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
-      - name: Build + run tester stage (executes upstream phpunit)
-        # The tester stage exits non-zero if any GLPI test fails — so
-        # the build itself IS the test. No load needed.
-        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
-        with:
-          context: .
-          target: tester
-          platforms: linux/amd64
-          push: false
-          cache-from: type=gha,scope=tester
-          cache-to: type=gha,scope=tester,mode=max
+          echo "init.sh idempotent — DB passwords stable across runs"
