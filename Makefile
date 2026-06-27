@@ -191,8 +191,8 @@ restore: ## Print pointer to the disaster-recovery runbook (not automated)
 	@printf '         runbook step by step:\n\n'
 	@printf '           docs/runbook-restore.md\n\n'
 	@printf '         TL;DR: stop app+scheduler, pick a dump from the backups volume,\n'
-	@printf '         drop+recreate the database, gunzip | mariadb, restore uploads/\n'
-	@printf '         and storage/ tarballs, then `make restart`.\n'
+	@printf '         drop+recreate the database, gunzip | mariadb, restore the\n'
+	@printf '         files/ and config/ tarballs, then `make restart`.\n'
 
 clean: ## DESTRUCTIVE: down + delete ALL volumes (db + uploads + backups)
 	@read -r -p "This deletes ALL data — the database, uploads AND the backups volume. Type 'yes' to proceed: " ans; \
@@ -202,7 +202,7 @@ clean: ## DESTRUCTIVE: down + delete ALL volumes (db + uploads + backups)
 .PHONY: \
 	help init up down restart logs logs-app ps \
 	backup backup-list backup-verify \
-	health test test-image test-glpi test-bats hardening-check \
+	health test test-image test-bats hardening-check \
 	dev build lint pull upgrade \
 	shell console restore clean \
 	overlays \

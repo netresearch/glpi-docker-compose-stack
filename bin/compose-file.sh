@@ -60,8 +60,7 @@ case "$action" in
     for p in "$@"; do
       # Allow-list the overlays this stack actually ships — anything else is
       # either a typo or someone wiring an untrusted compose file into the
-      # stack. GLPI has no built-in error tracking, so (unlike the Snipe-IT
-      # sibling) there is deliberately no bugsink/sentry overlay here.
+      # stack. The shipped overlays are traefik, caddy and observability.
       case "$p" in
         examples/compose.traefik.yml|examples/compose.caddy.yml|examples/compose.observability.yml) ;;
         *) echo "compose-file: unknown overlay (allowed: traefik, caddy, observability): $p" >&2; exit 1 ;;

@@ -60,7 +60,8 @@ jobs:
         run: |
           cp .env.example .env
           # supply just-good-enough placeholders so validation passes
-          # (GLPI has no APP_KEY — its crypt key is generated on first boot)
+          # (GLPI's only .env secrets are the DB passwords; its crypt key is
+          # minted on first boot inside the glpi-config volume)
           sed -i \
             -e 's/^GLPI_DB_PASSWORD=$/GLPI_DB_PASSWORD=ci-placeholder/' \
             -e 's/^DB_ROOT_PASSWORD=$/DB_ROOT_PASSWORD=ci-placeholder/' \

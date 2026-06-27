@@ -10,9 +10,8 @@
 # (sibling under bin/), so the fake repo includes both scripts.
 #
 # The accepted overlay allow-list is exactly: traefik, caddy,
-# observability. GLPI has no built-in error tracking, so (unlike the
-# Snipe-IT sibling) there is no bugsink/sentry overlay — those are
-# rejected even when the file exists.
+# observability. Any other examples/compose.*.yml path is rejected by the
+# allow-list — even when the file exists on disk.
 
 load test_helper
 
@@ -116,15 +115,14 @@ setup() {
   ! grep -q '^COMPOSE_FILE=' .env
 }
 
-@test "compose-file add: rejects a dropped overlay (bugsink) even if the file exists" {
-  # The bugsink overlay is intentionally NOT in the allow-list (GLPI has no
-  # built-in error tracking). The allow-list check runs before the file
-  # stat, so this is rejected even though setup_fake_repo created the file.
-  [ -f examples/compose.bugsink.yml ]
-  run ./bin/compose-file.sh add examples/compose.bugsink.yml
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"unknown overlay"* ]]
-  ! grep -q '^COMPOSE_FILE=' .env
+@test "compose-file add: accepts the observability overlay" {
+  # observability is one of the three allow-listed overlays — adding it must
+  # succeed and append it to COMPOSE_FILE. (The "file exists but not
+  # allow-listed → rejected" path is covered by the examples/random.yml test
+  # below.)
+  run ./bin/compose-file.sh add examples/compose.observability.yml
+  [ "$status" -eq 0 ]
+  grep -qx 'COMPOSE_FILE=compose.yml:examples/compose.observability.yml' .env
 }
 
 @test "compose-file add: rejects an allow-listed overlay whose file is missing" {

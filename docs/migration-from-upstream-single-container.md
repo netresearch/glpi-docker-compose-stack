@@ -139,8 +139,9 @@ Edit `.env`. The values that matter for a migration:
   DB + config restored, the entrypoint detects the existing install and runs
   `database:update` instead.
 - `TZ`, `GLPI_HTTP_PORT`, `GLPI_HOST` — set to taste.
-- There is **no `APP_KEY`** here — GLPI's encryption key is the
-  `glpicrypt.key` *file* you're migrating, not an env var.
+- GLPI's encryption key is **not** an env var — it is the `glpicrypt.key`
+  *file* you're migrating (see above). There is nothing crypto-related to set
+  in `.env`.
 
 Leave the `make init` DB passwords as they are; we adopt the bundled `db`
 service and rewrite the restored `config_db.php` to match it during cutover.
