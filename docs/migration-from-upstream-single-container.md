@@ -1,298 +1,304 @@
 <!-- SPDX-License-Identifier: CC-BY-SA-4.0 -->
 <!-- Copyright (c) 2026 Netresearch DTT GmbH -->
 
-# Migration: from `snipe/glpi` single-container to this stack
+# Migration: from the official `glpi/glpi` single-container image to this stack
 
-You're running GLPI on the upstream `snipe/glpi:vX.Y.Z-alpine`
-image — Apache, PHP-FPM, and cron stuffed into one container — and you
-want to move to this opinionated multi-container stack without losing
-data and without an open-ended downtime window. This guide walks
-through that move the way an experienced operator would: snapshot what
-you have, prepare the new home on the side, then do a short cutover
-with a clean rollback path if anything looks wrong. Allow about 30
-minutes; the cutover itself runs in roughly 10, but a slow DB restore
-or reverse-proxy hiccup will eat the rest.
+You run GLPI on the official `glpi/glpi` image — Apache + mod_php (plus an
+in-container cron worker) in one container, with all GLPI state under a single
+`/var/glpi` data volume — and you want to move to this php-fpm + nginx split
+stack without losing data and without an open-ended downtime window. This
+guide does that as an experienced operator would: snapshot what you have,
+prepare the new home on the side, then a short cutover with a clean rollback
+path. Allow about 30 minutes; the cutover itself runs in roughly 10.
 
 ## What's actually changing
 
-Upstream's container is one process tree doing everything: Apache
-fronting PHP-FPM, system cron firing Laravel's scheduler, file-system
-caches because there's nowhere else to put them. This stack splits
-those responsibilities across services that each do one thing.
+| Concern | Official `glpi/glpi` | This stack |
+|---|---|---|
+| Web server | Apache + mod_php (in-container) | nginx (`web`) + php-fpm (`app`) |
+| Cron | in-container worker (`GLPI_CRONTAB_ENABLED`) | `scheduler` (ofelia) → `front/cron.php` every 2 min |
+| Cache | filesystem default | `valkey` (RESP-compatible Redis fork) |
+| Data layout | one volume at `/var/glpi` | split named volumes (table below) |
+| Database | bring-your-own / sibling container | `db` (MariaDB 11) — BYO DB also supported |
+| Backups | external | `backup` (phpbu) — nightly DB + files + config |
 
-| Concern | Upstream single-container | This stack |
-|---------|---------------------------|------------|
-| Web server | Apache (in-container) | nginx (`web` service) |
-| PHP runtime | mod_php / fpm (in-container) | `app` service — `ghcr.io/netresearch/glpi-php-fpm` |
-| Scheduler / cron | system cron in-container | `scheduler` service (ofelia, Docker-native) |
-| Cache / sessions | filesystem default | `valkey` service (RESP-compatible Redis fork) |
-| Database | external (you provide) | `db` service (MariaDB 11) — bring-your-own DB also supported |
-| Backups | external (you provide) | optional `backup` service (phpbu-docker) |
-| Image scope | everything | each container does one thing |
+The PHP-FPM image bundles the GLPI release tarball (no Composer step at
+runtime), is multi-arch (`amd64` + `arm64`), and rebuilds nightly so base-OS
+CVE patches land without waiting for a GLPI release. The other services use
+upstream images.
 
-The PHP-FPM image is multi-arch (`linux/amd64` + `linux/arm64`), ships
-with SLSA build provenance attestations, and rebuilds nightly so base-OS
-and Composer-dep CVE patches land without waiting for an upstream tag.
-The other services use upstream images.
+### The path mapping (the crux)
+
+The official image consolidates everything under `/var/glpi`; this stack
+splits it across purpose-built volumes:
+
+| Official path | Holds | Goes into this stack's |
+|---|---|---|
+| `/var/glpi/config` | `config_db.php` + **`glpicrypt.key`** + local config | `glpi-config` volume → `/etc/glpi` |
+| `/var/glpi/files` | uploads, pictures, inventories, dumps, sessions, cache | `glpi-var` volume → `/var/lib/glpi/files` |
+| `/var/glpi/marketplace` | marketplace-installed plugins | `glpi-plugins` volume → `/var/lib/glpi/plugins` |
+| `/var/glpi/logs` | application logs (regenerated; optional to migrate) | `glpi-logs` volume → `/var/log/glpi` |
+| `/var/www/glpi/plugins` | manually-dropped plugins, if you used them | `glpi-plugins` volume → `/var/lib/glpi/plugins` |
+
+> The official image's install/skip flags are `GLPI_SKIP_AUTOINSTALL` /
+> `GLPI_SKIP_AUTOUPDATE`. This stack's equivalents are named differently —
+> `GLPI_AUTOINSTALL` (default `true`) and `SKIP_DB_UPDATE` — so don't copy the
+> old variable names across.
+
+## Read this first: `glpicrypt.key` must travel with the database
+
+`/var/glpi/config/glpicrypt.key` is GLPI's AES key for every encrypted DB
+field — LDAP/AD bind passwords, mail-collector credentials, external-DB and
+API secrets, plugin secrets. It **must** move together with the database. A
+new stack that doesn't get the original key (or worse, generates a fresh one)
+renders every stored credential unreadable: the UI loads, rows exist, but the
+content is garbage and must be re-entered.
+
+This stack's entrypoint will **not** generate a new key when a DB config is
+present but the key is missing — it warns and refuses — but the safe move is to
+copy `/var/glpi/config` wholesale so the key comes along.
 
 ## Before you start
 
-Three things save a 2 AM call to a colleague.
+**Know your source GLPI version.** This stack's image runs `database:update`
+on boot, applying GLPI's sequential migrations from your database's recorded
+version up to the image's version (currently 11.0.8). From a recent 10.0.x or
+11.0.x source this is supported. **⚠️ assumed for *your* specific source:** if
+you're on a much older release, upgrade the legacy instance to the latest
+10.0.x first to keep the jump inside a supported migration path — confirm
+against GLPI's upgrade documentation before committing to downtime.
 
-**Find your `APP_KEY` and copy it somewhere safe.** GLPI encrypts a
-handful of columns at rest — asset checkout history, LDAP bind
-passwords. A different `APP_KEY` on the new stack leaves those columns
-as silent garbage: UI renders fine, rows exist, but the content is
-unreadable. Copy the key, verify you can read it back, keep that copy
-until the new stack has been running a few days.
-
-**Inventory your volumes.** On the old host, `docker volume ls` and
-`docker compose -p <current-project> config | grep image:` will tell
-you what's mounted. Upstream's image typically uses one volume at
-`/var/lib/glpi` (uploads) and another at `/var/www/html/storage`
-(Laravel storage). Note the exact names; you'll feed them to the
-snapshot step.
-
-**Plan the network topology.** If a reverse proxy currently targets the
-upstream container's Apache, the new backend will be this stack's `web`
-service on its `glpi` Docker network. External proxies just need the
-new upstream address; in-Compose proxies need their network attached to
-`web` via `compose.override.yml`. Figure this out before downtime.
-
-A handful of shell variables make the rest readable:
+**Inventory the old volume.** Identify the single `/var/glpi` data volume (and
+any separate `/var/www/glpi/plugins` mount):
 
 ```bash
-export DEPLOY_DIR=/srv/www/glpi-new       # where the new stack lives
+docker volume ls
+docker inspect <old-glpi-container> --format '{{json .Mounts}}' | tr ',' '\n'
+```
+
+**Plan the proxy.** External reverse proxies just need to point at this stack's
+`web` service (loopback `GLPI_HTTP_PORT`, or attach the proxy to the `glpi`
+network); in-Compose proxies attach their network to `web` via
+`compose.override.yml`. See `examples/compose.traefik.yml`.
+
+A few shell variables make the rest readable:
+
+```bash
+export LEGACY_DIR=/srv/www/glpi-old           # current single-container stack
+export DEPLOY_DIR=/srv/www/glpi               # where this stack will live
 export BACKUP_DIR=/srv/backup/glpi-migration
-export LEGACY_DIR=/srv/www/glpi            # current upstream stack
+export OLD_DATA_VOLUME=glpi_data              # the real /var/glpi volume name
 mkdir -p "$BACKUP_DIR"
 ```
 
-## Take the snapshot while the lights are still on
+## Snapshot while the lights are still on
 
 This runs against the running legacy stack — no downtime yet.
 
 ```bash
-cd "$LEGACY_DIR"
+# 1. Database dump. Run it wherever your DB actually lives. If the database is
+#    a sibling MariaDB/MySQL container, dump from there (adjust the service
+#    name + root credential). For an external/managed DB, run mysqldump from a
+#    host that can reach it.
+docker compose -f "$LEGACY_DIR/docker-compose.yml" exec -T db sh -c '
+  mariadb-dump --single-transaction --quick \
+    -uroot -p"$MARIADB_ROOT_PASSWORD" "$MARIADB_DATABASE"
+' | gzip > "$BACKUP_DIR/glpi-db.sql.gz"
 
-# Database dump. Use whatever env var the upstream container exposes
-# for the root password (commonly MYSQL_ROOT_PASSWORD); the single
-# quotes around the inner script keep the expansion inside the
-# container, where the variable actually exists.
-docker compose exec -T db sh -c '
-  mysqldump --single-transaction -uroot -p"$MYSQL_ROOT_PASSWORD" glpi
-' > "$BACKUP_DIR/glpi-pre-migration.sql"
-
-# Uploads + Laravel storage. Replace <UPLOADS_VOLUME> and
-# <STORAGE_VOLUME> with the actual names from `docker volume ls`.
-docker run --rm -v <UPLOADS_VOLUME>:/uploads -v "$BACKUP_DIR":/backup \
-  alpine tar czf /backup/uploads.tar.gz -C /uploads .
-docker run --rm -v <STORAGE_VOLUME>:/storage -v "$BACKUP_DIR":/backup \
-  alpine tar czf /backup/storage.tar.gz -C /storage .
-
-# Keep the old .env — your APP_KEY source of truth and reference for
-# mail / LDAP / SAML.
-cp .env "$BACKUP_DIR/.env.pre-migration"
+# 2. The whole /var/glpi tree (config incl. glpicrypt.key, files, marketplace,
+#    logs). Read it straight off the volume with a throwaway container so you
+#    don't depend on tools inside the glpi image.
+docker run --rm \
+  -v "$OLD_DATA_VOLUME":/var/glpi:ro \
+  -v "$BACKUP_DIR":/backup \
+  alpine tar czf /backup/glpi-data.tar.gz -C /var/glpi .
 ```
 
-`ls -lah "$BACKUP_DIR"/` should show three non-empty artefacts plus the
-env snapshot. If any of them looks suspiciously small, stop and
-investigate — you don't want to discover an empty dump on the other
-side of downtime.
+Sanity-check both artefacts are non-empty before you burn any downtime:
 
-## Stand up the new stack on the side
+```bash
+ls -lah "$BACKUP_DIR"
+```
 
-Clone, fill in `.env`, leave it stopped until cutover:
+If either looks suspiciously small, stop and investigate — you don't want to
+discover an empty dump on the far side of downtime.
+
+## Stand up the new stack (stopped)
 
 ```bash
 git clone https://github.com/netresearch/glpi-docker-compose-stack.git "$DEPLOY_DIR"
 cd "$DEPLOY_DIR"
-cp .env.example .env
+make init          # generates .env with fresh random DB passwords
 ```
 
-Edit `.env`. The values that matter:
+Edit `.env`. The values that matter for a migration:
 
-- `APP_KEY` — paste the value you copied from the old `.env`. Same
-  string, no edits. Non-negotiable.
-- `DB_PASSWORD` and `DB_ROOT_PASSWORD` — pick fresh strong values. The
-  new `db` service gets initialised by the first `up`, so these are
-  creating credentials, not matching old ones.
-- `MAIL_*`, LDAP, SAML, OIDC, SSO — copy verbatim from the snapshot.
-- `APP_URL` — your public URL, no trailing slash.
+- **`GLPI_AUTOINSTALL=false`** — **critical.** It stops the entrypoint from
+  running a fresh `database:install` (which would create an empty schema *and*
+  a new `glpicrypt.key`) if `app` boots before your data is in place. With the
+  DB + config restored, the entrypoint detects the existing install and runs
+  `database:update` instead.
+- `TZ`, `GLPI_HTTP_PORT`, `GLPI_HOST` — set to taste.
+- There is **no `APP_KEY`** here — GLPI's encryption key is the
+  `glpicrypt.key` *file* you're migrating, not an env var.
 
-Reverse-proxy labels and other site-specific tweaks go in
-`compose.override.yml` (gitignored, survives `git pull`):
+Leave the `make init` DB passwords as they are; we adopt the bundled `db`
+service and rewrite the restored `config_db.php` to match it during cutover.
+(Alternative: to reuse your existing external DB, point `GLPI_DB_HOST` at it,
+remove/replace the bundled `db` service in `compose.override.yml`, and keep the
+old `config_db.php` host unchanged.)
 
-```yaml
-# compose.override.yml — local-only overrides
-services:
-  web:
-    labels:
-      # Your proxy labels go here. They previously applied to the
-      # upstream Apache container; now they apply to this stack's
-      # nginx `web` service.
-      # Example for Traefik:
-      # - "traefik.enable=true"
-      # - "traefik.http.routers.glpi.rule=Host(`assets.example.org`)"
-```
-
-Don't `docker compose up` yet — that happens during cutover, with the
-old stack already stopped, so you don't race two stacks against the
-same hostname.
+Do **not** `docker compose up` yet — that happens during cutover, with the old
+stack already stopped, so two stacks never race the same hostname.
 
 ## The cutover
 
-This is the short stretch where the dashboard is dark. Work straight
-through. Stop the old stack, bring DB + cache up first (so the restore
-has somewhere to land), replay the SQL dump, restore the file volumes,
-then bring the web tier up.
+Work straight through; this is the dark stretch.
 
 ```bash
-# Old stack down. Dashboard goes dark — this is downtime now.
-cd "$LEGACY_DIR"
-docker compose down
-```
+# 1. Old stack down — downtime starts here.
+docker compose -f "$LEGACY_DIR/docker-compose.yml" down
 
-Bring up only DB and cache from the new stack and wait for MariaDB:
-
-```bash
+# 2. Bring up ONLY db + valkey on the new stack so the restore has a target.
 cd "$DEPLOY_DIR"
 docker compose up -d db valkey
-
-# The root password lives inside the container as
-# MARIADB_ROOT_PASSWORD (compose.yml populates it from .env's
-# DB_ROOT_PASSWORD). Single quotes keep the variable expansion inside
-# the container.
 docker compose exec -T db sh -c '
-  until mariadb-admin ping -uroot -p"$MARIADB_ROOT_PASSWORD" --silent; do
-    sleep 1
-  done
-'
+  until mariadb-admin ping -uroot -p"$MARIADB_ROOT_PASSWORD" --silent; do sleep 1; done'
+
+# 3. Restore the DB dump into the new db (the dump is a single named database).
+zcat "$BACKUP_DIR/glpi-db.sql.gz" \
+  | docker compose exec -T db sh -c 'mariadb -uroot -p"$MARIADB_ROOT_PASSWORD" "$MARIADB_DATABASE"'
 ```
 
-Once the ping loop exits, restore the dump — same trick, password
-expanded inside the container:
+Now unpack `/var/glpi` once into a staging directory and load each subtree into
+its matching named volume. Staging first keeps the mapping explicit and avoids
+fragile in-tar path surgery:
 
 ```bash
-docker compose exec -T db sh -c '
-  mariadb -uroot -p"$MARIADB_ROOT_PASSWORD" glpi
-' < "$BACKUP_DIR/glpi-pre-migration.sql"
+# 4. Unpack the snapshot
+mkdir -p "$BACKUP_DIR/stage"
+tar xzf "$BACKUP_DIR/glpi-data.tar.gz" -C "$BACKUP_DIR/stage"
+ls "$BACKUP_DIR/stage"        # -> config  files  logs  marketplace
+
+# config (config_db.php + glpicrypt.key + local config) -> glpi-config
+docker run --rm -v glpi-config:/dest -v "$BACKUP_DIR/stage/config":/src:ro \
+  alpine sh -c 'cp -a /src/. /dest/'
+
+# files -> glpi-var
+docker run --rm -v glpi-var:/dest -v "$BACKUP_DIR/stage/files":/src:ro \
+  alpine sh -c 'cp -a /src/. /dest/'
+
+# marketplace plugins -> glpi-plugins (skip if your source had none)
+docker run --rm -v glpi-plugins:/dest -v "$BACKUP_DIR/stage":/stage:ro \
+  alpine sh -c '[ -d /stage/marketplace ] && cp -a /stage/marketplace/. /dest/ || echo "no marketplace dir — skipping"'
 ```
 
-Now restore the file volumes. This stack pins explicit volume names in
-`compose.yml` (`name: glpi-app-data`, `name: glpi-app-storage`,
-etc.), so the names below are exactly the literal names Docker
-created — no project-name prefix, no dependency on what you called
-`$DEPLOY_DIR`.
+Fix ownership on the migrated trees using the **app image's own** `www-data`
+(so the uid is correct regardless of base-image differences), then rewrite the
+DB connection settings to point at the new `db` service — without touching the
+schema or the key:
 
 ```bash
-docker run --rm -v glpi-app-data:/data -v "$BACKUP_DIR":/backup \
-  alpine tar xzf /backup/uploads.tar.gz -C /data
-docker run --rm -v glpi-app-storage:/storage -v "$BACKUP_DIR":/backup \
-  alpine tar xzf /backup/storage.tar.gz -C /storage
+# 5. Deep-chown the migrated state to the runtime user
+docker compose run --rm --user root --entrypoint sh app -c '
+  chown -R www-data:www-data /etc/glpi /var/lib/glpi/files /var/lib/glpi/plugins'
+
+# 6. Repoint config_db.php at the bundled db (writes only config_db.php;
+#    never drops/installs the schema, never touches glpicrypt.key)
+docker compose run --rm --user www-data --entrypoint sh app -c '
+  php bin/console database:configure --reconfigure \
+    --db-host=db --db-port=3306 \
+    --db-name="$GLPI_DB_NAME" --db-user="$GLPI_DB_USER" \
+    --db-password="$GLPI_DB_PASSWORD" --no-interaction'
 ```
 
-> **Heads-up:** the literal names work because this stack's
-> `compose.yml` explicitly pins them. If you wrote your own
-> `compose.yml` without the `name:` keys, default Compose naming
-> applies (`<project>_<volume>`) and these literal names won't match.
-> `docker volume ls` right after `up -d db valkey` is the fastest way
-> to confirm what Docker actually created.
-
-Bring everything else up and wait for healthchecks:
+Bring everything up and let the schema migrate:
 
 ```bash
-docker compose up -d --wait
+# 7. Full start — the entrypoint sees config_db.php + the glpi_configs table
+#    and runs database:update (NOT a fresh install, because data is present and
+#    GLPI_AUTOINSTALL=false).
+docker compose up -d
+docker compose logs -f app
 ```
 
-`--wait` blocks until every service with a healthcheck reports healthy.
-If it returns non-zero, jump to the troubleshooting section below.
+Watch for `database:update complete` and confirm the entrypoint does **not**
+print the `glpicrypt.key MISSING` warning.
 
 ## How you know it worked
 
-Test the canary first. Open the UI, log in, click into an asset with a
-checkout history, and confirm the "checked out to" entries render
-readable user names — **not corrupted bytes.** That's the test that
-matters: if it fails, the `APP_KEY` did not transfer correctly. Stop
-and roll back.
+Test the canary first: log in, open **Setup > Authentication > LDAP
+directories**, and run **Test** on a directory. A successful bind proves
+`glpicrypt.key` migrated correctly — the encrypted bind password decrypts. If
+it fails, the key did not transfer; stop and fix it before anyone relies on the
+instance.
 
-If checkouts read clean, walk through the rest:
+Then walk the rest:
 
 ```bash
-docker compose ps                                # every service healthy
-curl -fsS -I http://localhost:8000/ | head -5    # HTTP reachable
-
-# Smoke-check counts
-docker compose exec app php artisan tinker --execute='echo "Users: " . \App\Models\User::count() . PHP_EOL;'
-docker compose exec app php artisan tinker --execute='echo "Assets: " . \App\Models\Asset::count() . PHP_EOL;'
-
-# Scheduler alive and talking to Docker
-docker compose logs scheduler --tail=20
+docker compose ps                                           # every service healthy
+curl -fsS -I "http://127.0.0.1:${GLPI_HTTP_PORT:-8080}/" | head -5
+docker compose logs scheduler --tail=20                     # glpi-cron firing within ~2 min
+docker compose exec app stat -c '%y' /var/lib/glpi/files/.cron-heartbeat   # fresh
 ```
 
-The scheduler log should show `successfully connected to docker
-socket` and, within a minute, the first `glpi-schedule` and
-`glpi-heartbeat` job executions. Run one report from the UI for
-good measure, then watch `docker compose logs -f app` for a couple of
-minutes — no stack traces, no decryption warnings, no 500s.
+Click around for a couple of minutes watching `docker compose logs -f app` —
+no stack traces, no decryption warnings, no 500s.
 
 ## If something goes wrong
 
-The new stack only writes to its own volumes during cutover, so
-rollback is fast:
+The new stack only wrote to its own volumes during cutover, so rollback is
+fast:
 
 ```bash
 cd "$DEPLOY_DIR" && docker compose down
-cd "$LEGACY_DIR" && docker compose up -d
+docker compose -f "$LEGACY_DIR/docker-compose.yml" up -d
 ```
 
 The snapshot in `$BACKUP_DIR` is your worst-case insurance.
 
-**Encrypted columns look corrupted.** UI loads, lists render, but
-checkout-to fields and LDAP-derived data look like garbage or trigger
-"decryption failed" in `storage/logs/laravel.log`. Almost always an
-`APP_KEY` mistyped or pasted with trailing whitespace. Fix `APP_KEY` in
-`.env`, `docker compose restart app`, recheck. If the key really did
-transfer correctly and it still fails, roll back.
+**Stored credentials look empty / "decryption failed".** `glpicrypt.key` didn't
+migrate, or a fresh one was generated. Check it's there and the entrypoint
+didn't warn:
 
-**Reverse proxy returns 502.** The proxy is reaching something but not
-the right thing — usually still targeting the old service name or
-network. Update the proxy's upstream to the new `web` service, or
-attach `web` to whichever Docker network your proxy uses. The stack's
-own network is named `glpi`.
+```bash
+docker run --rm -v glpi-config:/c:ro alpine ls -l /c/glpicrypt.key
+docker compose logs app | grep -i glpicrypt
+```
 
-**Scheduler logs say permission denied on the docker socket.** Ofelia
-needs the host's `/var/run/docker.sock` to `docker exec`
-`schedule:run` into `app`. Check the `scheduler` service's volume mount
-against the actual socket path on your host. Most distributions work
-unchanged; rootless Docker setups expose the socket elsewhere.
+Re-run step 4's config copy from the snapshot, `chown` (step 5), restart.
+
+**App can't connect to the database.** `config_db.php` still points at the old
+host/credentials — re-run step 6 (`database:configure --reconfigure`).
+
+**Reverse proxy returns 502.** The proxy is still targeting the old container
+or network. Point it at the new `web` service, or attach `web` to the proxy's
+network. This stack's own network is named `glpi`.
+
+**Scheduler logs say permission denied on the docker socket.** ofelia needs the
+host's `/var/run/docker.sock` to exec `front/cron.php` into `app`. Check the
+`scheduler` service's volume mount against the real socket path (rootless /
+podman setups expose it elsewhere).
 
 ## After the dust settles
 
-Give the new stack a day or two of normal traffic. Let one nightly
-`phpbu` run finish (default 03:00) so you've proven the backup loop
-end-to-end. Then archive the legacy directory rather than deleting:
+Give the new stack a day or two of normal traffic and let one nightly `phpbu`
+run finish (03:00 UTC — the scheduler evaluates its cron in UTC) so you've proven the
+backup loop end-to-end — note that this stack now archives the config dir
+(including `glpicrypt.key`) for you. Then archive the legacy directory rather
+than deleting:
 
 ```bash
 mv "$LEGACY_DIR" "${LEGACY_DIR}.archive-$(date +%Y%m%d)"
-# If your new deploy dir has a temporary suffix:
-# mv "$DEPLOY_DIR" "$LEGACY_DIR"
-docker image rm snipe/glpi:vX.Y.Z-alpine
 ```
 
-Keep the migration snapshots in `$BACKUP_DIR` for ~30 days. After that,
-the stack's nightly `phpbu` artefacts cover you.
+Keep the migration snapshot in `$BACKUP_DIR` for ~30 days; after that the
+stack's nightly phpbu artefacts cover you.
 
 ## Staying current
 
-Subscribe to releases on
-[netresearch/glpi-docker-compose-stack](https://github.com/netresearch/glpi-docker-compose-stack/releases)
-so notable changes reach you. For routine updates, `make upgrade` pulls
-the latest images and recreates containers; the `app` entrypoint runs
-`php artisan migrate --force` on every start, so schema bumps are
-automatic.
-
-For day-2 troubleshooting, [`runbook-day2-ops.md`](runbook-day2-ops.md)
-catalogues the failure modes we've seen in production; for worst-case
-disaster recovery from `phpbu` artefacts, [`runbook-restore.md`](runbook-restore.md)
-is the canonical procedure.
+For routine updates afterward, see
+[runbook-day2-ops.md](runbook-day2-ops.md) (version bumps via `GLPI_IMAGE_TAG`
+/ `.glpi-version`, the daily-rebuild tag scheme, and the `database:update`
+flow). For disaster recovery from phpbu artefacts, see
+[runbook-restore.md](runbook-restore.md).

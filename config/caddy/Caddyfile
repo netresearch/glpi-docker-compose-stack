@@ -7,17 +7,17 @@
 #   - HTTP -> HTTPS redirect on port 80
 #   - Certificate issuance + renewal via Let's Encrypt (ACME HTTP-01 or
 #     TLS-ALPN-01 challenge — requires ports 80 + 443 reachable from the
-#     public internet, and SNIPEIT_HOST resolving via public DNS)
+#     public internet, and GLPI_HOST resolving via public DNS)
 #   - OCSP stapling
 #   - Modern TLS defaults (TLS 1.2+, sane cipher suites)
 #
-# The `{$SNIPEIT_HOST}` placeholder is substituted at container start from
+# The `{$GLPI_HOST}` placeholder is substituted at container start from
 # the env var passed by compose.caddy.yml (sourced from .env).
 #
 # For staging / wildcard certs / DNS-01 challenges, see:
 #   https://caddyserver.com/docs/automatic-https
 
-{$SNIPEIT_HOST} {
+{$GLPI_HOST} {
 	# Forward all traffic to the nginx `web` service over the shared docker
 	# network. `web` listens on port 80 inside the network.
 	reverse_proxy web:80

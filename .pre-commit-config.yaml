@@ -1,0 +1,72 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Netresearch DTT GmbH
+#
+# Local fast-feedback gate. Mirrors the static checks CI runs (lint.yml:
+# hadolint + shellcheck + yamllint + actionlint) so failures surface on
+# `git commit` instead of in CI.
+#
+#   pipx install pre-commit   # or: uv tool install pre-commit
+#   pre-commit install        # enable the git hook
+#   pre-commit run --all-files
+#
+# Hook versions are pinned and bumped by Renovate / `pre-commit autoupdate`.
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+        # Preserve Markdown hard line breaks (two trailing spaces); matches
+        # .editorconfig's `trim_trailing_whitespace = false` for *.md.
+        args: [--markdown-linebreak-ext=md]
+      - id: end-of-file-fixer
+      - id: check-yaml
+        # dependabot.yml and friends use explicit `---` document markers.
+        args: [--allow-multiple-documents]
+      - id: check-json
+      - id: check-added-large-files
+        args: [--maxkb=1000]
+      - id: check-merge-conflict
+      - id: detect-private-key
+
+  # shellcheck — bin/*.sh helpers + rootfs/usr/local/bin/entrypoint.sh.
+  - repo: https://github.com/koalaman/shellcheck-precommit
+    rev: v0.11.0
+    hooks:
+      - id: shellcheck
+
+  # hadolint — Dockerfile lint (reads the repo's .hadolint.yaml). The -docker
+  # variant needs no local hadolint install.
+  - repo: https://github.com/hadolint/hadolint
+    rev: v2.14.0
+    hooks:
+      - id: hadolint-docker
+
+  # yamllint — same ruleset CI applies inline (lint.yml), kept in sync here so
+  # local and CI verdicts match. The repo has no .yamllint.yml on purpose.
+  - repo: https://github.com/adrienverge/yamllint
+    rev: v1.38.0
+    hooks:
+      - id: yamllint
+        args:
+          - -d
+          - "{extends: default, rules: {line-length: disable, document-start: disable, truthy: {check-keys: false}, comments: {min-spaces-from-content: 1}}}"
+
+  # actionlint — GitHub Actions workflow lint (also flags shell issues in
+  # `run:` blocks via its embedded shellcheck).
+  - repo: https://github.com/rhysd/actionlint
+    rev: v1.7.12
+    hooks:
+      - id: actionlint
+
+  # Local hook: validate the bake file parses and resolves. Needs Docker
+  # Buildx on PATH (same as `make lint` / CONTRIBUTING).
+  - repo: local
+    hooks:
+      - id: validate-bake
+        name: Validate docker-bake.hcl
+        # -f scopes to the bake file (bake would otherwise also merge compose.yml).
+        entry: docker buildx bake -f docker-bake.hcl --print
+        language: system
+        files: ^docker-bake\.hcl$
+        pass_filenames: false

@@ -1,94 +1,30 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Netresearch DTT GmbH
 #
-# Reusable workflow: one (track, composer) cell of the build matrix.
-# Fans out per-arch builds and merges them into a multi-arch manifest list.
-# Called from build.yml's `cell` orchestrator job (one call per row).
+# Reusable workflow: build the GLPI image for both arches and merge them into
+# one multi-arch manifest list, with SLSA provenance, an in-image SBOM, and
+# keyless cosign signatures. Called from build.yml's `build` job.
 #
-# Why a reusable workflow per cell, instead of one big top-level matrix
-# with a separate merge job that `needs: build`?
-#
-# `needs: build` would block EVERY merge cell behind the slowest build
-# cell in the entire matrix. With a reusable workflow per (track,
-# composer) cell, each cell's merge job only depends on ITS own two
-# per-arch builds — so e.g. master/rolling/{amd64,arm64} can merge as
-# soon as both arches are done, even if tag/pinned/arm64 is still
-# building. See issue netresearch/glpi-docker-compose-stack#29 for
-# the full rationale.
+# Native amd64 + arm64 runners (no QEMU) each push their layer BY DIGEST; the
+# merge job joins the two digests into a single tagged manifest list, attests
+# it, and cosign-signs the index + per-arch children.
 
 name: _build-cell
 
 on:
   workflow_call:
     inputs:
-      track:
-        description: 'Track name (tag / master / develop)'
-        type: string
-        required: true
-      composer:
-        description: 'Composer mode (pinned / rolling)'
-        type: string
-        required: true
-      ref_source:
-        description: 'How to resolve the ref (file / master / develop)'
-        type: string
-        required: true
-      tags_extra:
-        description: 'Comma-separated extra tags for branch-stream cells (e.g. "master" or "develop,nightly")'
-        type: string
-        required: false
-        default: ''
-      ref:
-        description: 'Resolved upstream ref (tag string or branch name)'
-        type: string
-        required: true
-      version:
-        description: 'Resolved image-tag version (e.g. "8.5.0" or "master-20260525-abc1234")'
-        type: string
-        required: true
-      major:
-        description: 'Major version (tag-stream only, "" otherwise)'
-        type: string
-        required: false
-        default: ''
-      major_minor:
-        description: 'Major.minor version (tag-stream only, "" otherwise)'
-        type: string
-        required: false
-        default: ''
-      build_date:
-        description: 'RFC-3339 build timestamp, resolved once for the whole run'
-        type: string
-        required: true
-      date_tag:
-        description: 'YYYYMMDD date stamp, resolved once for the whole run (no midnight crossings)'
-        type: string
-        required: true
-      registry:
-        description: 'Container registry (e.g. ghcr.io)'
-        type: string
-        required: true
-      image_name:
-        description: 'Image name (e.g. owner/glpi-php-fpm)'
-        type: string
-        required: true
-      is_main_ref:
-        description: 'Whether github.ref is refs/heads/main (controls latest/rolling tag emission)'
-        type: boolean
-        required: true
-      is_release_from_file:
-        description: 'Whether the tag-stream ref came from .glpi-version (NOT a manual override)'
-        type: boolean
-        required: true
-      fork_pr:
-        description: 'Whether this run is a PR from a fork (withholds GH_TOKEN to the BuildKit secret)'
-        type: boolean
-        required: false
-        default: false
-      push_artifacts:
-        description: 'Whether to push to the registry (false on PR events, true otherwise)'
-        type: boolean
-        required: true
+      version:       { type: string,  required: true }
+      major:         { type: string,  required: true }
+      major_minor:   { type: string,  required: true }
+      glpi_sha256:   { type: string,  required: true }
+      build_date:    { type: string,  required: true }
+      date_tag:      { type: string,  required: true }
+      registry:      { type: string,  required: true }
+      image_name:    { type: string,  required: true }
+      is_main_ref:           { type: boolean, required: true }
+      is_release_from_file:  { type: boolean, required: true }
+      push_artifacts:        { type: boolean, required: true }
 
 permissions:
   contents: read
@@ -97,13 +33,6 @@ jobs:
   build:
     name: build (${{ matrix.platform.arch }})
     runs-on: ${{ matrix.platform.runner }}
-    # Rolling variants resolve composer deps fresh against composer.json
-    # ranges, so they fail whenever upstream GLPI's constraints
-    # reference a major that's now under a composer audit advisory
-    # (e.g. symfony/dom-crawler ^4.4 → PKSA-5r1g-c7b7-y1zg). This is the
-    # rolling variant working as designed; don't let it block the pinned
-    # variants which ARE the canonical release artefacts.
-    continue-on-error: ${{ inputs.composer == 'rolling' }}
     permissions:
       contents: read
       packages: write
@@ -113,21 +42,15 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          # Native runners per arch — no QEMU emulation. amd64 builds
-          # on ubuntu-latest (~12 min), arm64 on ubuntu-24.04-arm (~12
-          # min, in parallel).
           - arch: amd64
             runner: ubuntu-latest
           - arch: arm64
-            runner: ubuntu-24.04-arm
+            runner: ubuntu-24.04-arm   # native arm64 — no QEMU emulation
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-
-      # QEMU intentionally NOT installed: native amd64 + arm64 runners
-      # build their own platform.
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
@@ -140,136 +63,24 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Compute image tags (tag-stream)
-        if: inputs.ref_source == 'file'
-        id: tags_tag
-        env:
-          # All ${{ ... }} interpolation goes through env vars rather than
-          # directly into the run-script body — sonarcloud rule
-          # githubactions:S7630 (shell injection).
-          IS_RELEASE_FROM_FILE: ${{ inputs.is_release_from_file }}
-          COMPOSER_MODE: ${{ inputs.composer }}
-          REF_VERSION: ${{ inputs.version }}
-          REF_DATE_TAG: ${{ inputs.date_tag }}
-          REF_MAJOR_MINOR: ${{ inputs.major_minor }}
-          REF_MAJOR: ${{ inputs.major }}
-          IS_MAIN_REF: ${{ inputs.is_main_ref }}
-        run: |
-          # Suffix derived from composer mode:
-          #   pinned  -> '' (bare tags — 8.5.0, 8.5, 8, latest)
-          #   rolling -> '-rolling' (8.5.0-rolling, 8.5-rolling, 8-rolling, rolling)
-          SUF=""
-          LATEST="latest"
-          if [ "$COMPOSER_MODE" = "rolling" ]; then
-            SUF="-rolling"
-            LATEST="rolling"
-          fi
-          ENABLE_LATEST="false"
-          if [ "$IS_RELEASE_FROM_FILE" = "true" ] && [ "$IS_MAIN_REF" = "true" ]; then
-            ENABLE_LATEST="true"
-          fi
-          {
-            echo "tags<<__EOF__"
-            echo "type=raw,value=${REF_VERSION}${SUF}"
-            echo "type=raw,value=${REF_VERSION}${SUF}-${REF_DATE_TAG}"
-            echo "type=raw,value=${REF_MAJOR_MINOR}${SUF}"
-            echo "type=raw,value=${REF_MAJOR}${SUF}"
-            # `latest` (pinned) / `rolling` (rolling-latest) only when the build
-            # is from the .glpi-version file AND ref is main.
-            echo "type=raw,value=${LATEST},enable=${ENABLE_LATEST}"
-            echo "type=sha,prefix=sha-${COMPOSER_MODE}-"
-            echo "__EOF__"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Compute image tags (branch-stream)
-        if: inputs.ref_source != 'file'
-        id: tags_branch
-        env:
-          COMPOSER_MODE: ${{ inputs.composer }}
-          TAGS_EXTRA: ${{ inputs.tags_extra }}
-          REF_VERSION: ${{ inputs.version }}
-        run: |
-          SUF=""
-          if [ "$COMPOSER_MODE" = "rolling" ]; then
-            SUF="-rolling"
-          fi
-          # master / develop builds — branch tags + dated snapshot, no latest/major
-          {
-            echo "tags<<__EOF__"
-            # shellcheck disable=SC2086 # word-split intentional on comma list
-            for t in $(echo "$TAGS_EXTRA" | tr ',' ' '); do
-              echo "type=raw,value=${t}${SUF}"
-            done
-            echo "type=raw,value=${REF_VERSION}${SUF}"
-            echo "type=sha,prefix=sha-${COMPOSER_MODE}-"
-            echo "__EOF__"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6.1.0
-        with:
-          images: ${{ inputs.registry }}/${{ inputs.image_name }}
-          tags: ${{ steps.tags_tag.outputs.tags || steps.tags_branch.outputs.tags }}
-          labels: |
-            org.opencontainers.image.title=glpi-php-fpm
-            org.opencontainers.image.description=Hardened GLPI ${{ inputs.version }} on PHP 8.5 / Alpine
-            org.opencontainers.image.version=${{ inputs.version }}
-            org.opencontainers.image.created=${{ inputs.build_date }}
-            org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.licenses=AGPL-3.0-or-later
-
-      - name: Build (by digest, no tags yet — tags pushed by merge job)
+      - name: Build (by digest — tags attached by the merge job)
         id: build
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
           context: .
           platforms: linux/${{ matrix.platform.arch }}
           target: runtime
-          # Push by digest only: no human-readable tag is attached to
-          # this per-platform manifest. The merge job downloads all
-          # per-arch digests and creates a single multi-arch manifest
-          # list with the actual tags. Skipped entirely on PR events
-          # (push: false) so PRs never write to the registry.
           outputs: type=image,name=${{ inputs.registry }}/${{ inputs.image_name }},push-by-digest=true,name-canonical=true,push=${{ inputs.push_artifacts }}
-          labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            GLPI_VERSION=${{ inputs.ref }}
+            GLPI_VERSION=${{ inputs.version }}
+            GLPI_SHA256=${{ inputs.glpi_sha256 }}
             BUILD_DATE=${{ inputs.build_date }}
             VCS_REF=${{ github.sha }}
-            ROLLING_DEPS=${{ inputs.composer == 'rolling' }}
-          # BuildKit secret. Picked up by the Dockerfile's composer install
-          # RUN via `--mount=type=secret,id=GH_TOKEN` and used to authenticate
-          # api.github.com fetches during dependency resolution. Without it,
-          # parallel matrix cells share the anonymous 60-req/h rate limit and
-          # randomly fail on "Could not authenticate against github.com".
-          # GITHUB_TOKEN is scoped to this job and expires when the job ends.
-          #
-          # Withheld on pull_request events FROM FORKS: a hostile fork PR
-          # could otherwise modify the Dockerfile to exfiltrate the token
-          # via the secret mount. Same-repo PRs still get the token —
-          # those contributors are trusted (commit / push access already
-          # granted). The orchestrator computes `fork_pr` once and passes
-          # the boolean in so the conditional stays out of the build-args.
-          #
-          # GHA ternary correctness: `A && B || C` returns B when A is
-          # truthy, else C — but only because the chain re-evaluates with
-          # the resulting value. If B is `''` (falsy), the `|| C` fallback
-          # always wins, leaking the token. Always put the TRUTHY value
-          # (TOKEN here) on the `&&` side and `''` on the `||` side.
-          secrets: |
-            GH_TOKEN=${{ !inputs.fork_pr && secrets.GITHUB_TOKEN || '' }}
           provenance: mode=max
           sbom: true
-          cache-from: type=gha,scope=${{ inputs.track }}-${{ inputs.composer }}
-          cache-to: type=gha,scope=${{ inputs.track }}-${{ inputs.composer }},mode=max
+          cache-from: type=gha,scope=glpi-${{ matrix.platform.arch }}
+          cache-to: type=gha,scope=glpi-${{ matrix.platform.arch }},mode=max
 
-      # Attest the per-arch image too — keeps `gh attestation verify`
-      # working when consumers do arch-pinned verification (resolve tag
-      # → pull per-arch digest → verify that digest). The merge job
-      # ALSO attests the multi-arch index digest, so both verification
-      # surfaces stay green. Mirrors the cosign --recursive call in
-      # merge that signs both the index and its children.
       - name: Attest per-arch image
         if: inputs.push_artifacts
         uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
@@ -278,43 +89,29 @@ jobs:
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
 
-      # Per-arch digest export. The merge job downloads every per-arch
-      # artifact for a given (track, composer) and joins them into one
-      # multi-arch manifest with `docker buildx imagetools create`, then
-      # signs the index digest (and per-arch children via --recursive).
       - name: Export per-arch digest
         if: inputs.push_artifacts
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           mkdir -p /tmp/digests
-          # File name is the digest minus the algorithm prefix, content
-          # is empty — the file's existence + its name is the payload.
           touch "/tmp/digests/${DIGEST#sha256:}"
 
       - name: Upload per-arch digest artifact
         if: inputs.push_artifacts
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         with:
-          name: digests-${{ inputs.track }}-${{ inputs.composer }}-${{ matrix.platform.arch }}
+          name: digests-${{ matrix.platform.arch }}
           path: /tmp/digests/*
           if-no-files-found: error
           retention-days: 1
 
-  # ─ Merge per-arch digests into a single multi-arch manifest list ───────
-  # Runs after THIS cell's two per-arch builds complete. Because this is
-  # the only `needs: build` relationship in the cell-scope, the merge
-  # cell starts as soon as both its arches are done — independent of
-  # any other (track, composer) cell's progress.
+  # ─ Merge per-arch digests into one tagged multi-arch manifest list ─────
   merge:
     name: merge
-    # `!cancelled()` (instead of default success-required) keeps the
-    # 2-digest guard below in charge of catching arch-build flakes,
-    # rather than silently skipping with no diagnostic.
     if: inputs.push_artifacts && !cancelled()
     needs: build
     runs-on: ubuntu-latest
-    continue-on-error: ${{ inputs.composer == 'rolling' }}
     permissions:
       contents: read
       packages: write
@@ -330,7 +127,7 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: /tmp/digests
-          pattern: digests-${{ inputs.track }}-${{ inputs.composer }}-*
+          pattern: digests-*
           merge-multiple: true
 
       - name: Set up Docker Buildx
@@ -343,59 +140,31 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Compute image tags (tag-stream)
-        if: inputs.ref_source == 'file'
-        id: tags_tag
+      - name: Compute image tags
+        id: tags
         env:
-          IS_RELEASE_FROM_FILE: ${{ inputs.is_release_from_file }}
-          COMPOSER_MODE: ${{ inputs.composer }}
           REF_VERSION: ${{ inputs.version }}
           REF_DATE_TAG: ${{ inputs.date_tag }}
           REF_MAJOR_MINOR: ${{ inputs.major_minor }}
           REF_MAJOR: ${{ inputs.major }}
+          IS_RELEASE_FROM_FILE: ${{ inputs.is_release_from_file }}
           IS_MAIN_REF: ${{ inputs.is_main_ref }}
         run: |
-          SUF=""
-          LATEST="latest"
-          if [ "$COMPOSER_MODE" = "rolling" ]; then
-            SUF="-rolling"
-            LATEST="rolling"
-          fi
-          ENABLE_LATEST="false"
+          # `latest` / floating major(.minor) tags only when building the
+          # pinned release from .glpi-version on the main branch — never from
+          # a manual workflow_dispatch override.
+          ENABLE_FLOATING="false"
           if [ "$IS_RELEASE_FROM_FILE" = "true" ] && [ "$IS_MAIN_REF" = "true" ]; then
-            ENABLE_LATEST="true"
+            ENABLE_FLOATING="true"
           fi
           {
             echo "tags<<__EOF__"
-            echo "type=raw,value=${REF_VERSION}${SUF}"
-            echo "type=raw,value=${REF_VERSION}${SUF}-${REF_DATE_TAG}"
-            echo "type=raw,value=${REF_MAJOR_MINOR}${SUF}"
-            echo "type=raw,value=${REF_MAJOR}${SUF}"
-            echo "type=raw,value=${LATEST},enable=${ENABLE_LATEST}"
-            echo "type=sha,prefix=sha-${COMPOSER_MODE}-"
-            echo "__EOF__"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Compute image tags (branch-stream)
-        if: inputs.ref_source != 'file'
-        id: tags_branch
-        env:
-          COMPOSER_MODE: ${{ inputs.composer }}
-          TAGS_EXTRA: ${{ inputs.tags_extra }}
-          REF_VERSION: ${{ inputs.version }}
-        run: |
-          SUF=""
-          if [ "$COMPOSER_MODE" = "rolling" ]; then
-            SUF="-rolling"
-          fi
-          {
-            echo "tags<<__EOF__"
-            # shellcheck disable=SC2086 # word-split intentional on comma list
-            for t in $(echo "$TAGS_EXTRA" | tr ',' ' '); do
-              echo "type=raw,value=${t}${SUF}"
-            done
-            echo "type=raw,value=${REF_VERSION}${SUF}"
-            echo "type=sha,prefix=sha-${COMPOSER_MODE}-"
+            echo "type=raw,value=${REF_VERSION}"
+            echo "type=raw,value=${REF_VERSION}-${REF_DATE_TAG}"
+            echo "type=raw,value=${REF_MAJOR_MINOR},enable=${ENABLE_FLOATING}"
+            echo "type=raw,value=${REF_MAJOR},enable=${ENABLE_FLOATING}"
+            echo "type=raw,value=latest,enable=${ENABLE_FLOATING}"
+            echo "type=sha,prefix=sha-"
             echo "__EOF__"
           } >> "$GITHUB_OUTPUT"
 
@@ -404,7 +173,7 @@ jobs:
         uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6.1.0
         with:
           images: ${{ inputs.registry }}/${{ inputs.image_name }}
-          tags: ${{ steps.tags_tag.outputs.tags || steps.tags_branch.outputs.tags }}
+          tags: ${{ steps.tags.outputs.tags }}
 
       - name: Create + push multi-arch manifest list
         id: manifest
@@ -413,68 +182,37 @@ jobs:
           METADATA_JSON: ${{ steps.meta.outputs.json }}
         run: |
           set -euo pipefail
-          # Build the -t flag list from metadata-action's tag output
-          # (JSON array under .tags). Build the per-arch source-image
-          # arguments from the digest files dropped by the build jobs.
-          # Use --tag=<value> (single argv token) instead of `-t <value>`
-          # (two tokens). The previous mapfile-with-"-t X" produced
-          # array elements that were one space-containing string, which
-          # `${TAG_FLAGS[@]}` then passed as a single argv to buildx —
-          # docker would see one arg `-t ghcr.io/...:8.5.0` and fail
-          # flag parsing. The =-form sidesteps that entirely.
           mapfile -t TAG_FLAGS < <(jq -r '.tags[] | "--tag=\(.)"' <<<"$METADATA_JSON")
           mapfile -t SRC_REFS < <(
             find /tmp/digests -maxdepth 1 -type f -printf "${IMAGE}@sha256:%f\n"
           )
-          # Sanity: we expect exactly 2 per-arch digests (amd64+arm64).
-          # If a build-job arch failed silently — or a pattern-mismatch
-          # on the artifact download dropped a digest — we'd otherwise
-          # publish a degenerate single-arch manifest under the multi-
-          # arch tag. Fail loudly instead.
+          # Expect exactly 2 per-arch digests (amd64 + arm64). Fewer means an
+          # arch build failed silently — fail loudly rather than publish a
+          # degenerate single-arch image under the multi-arch tag.
           if [ "${#SRC_REFS[@]}" -ne 2 ]; then
             echo "ERROR: expected 2 per-arch digests, got ${#SRC_REFS[@]}" >&2
             printf '  %s\n' "${SRC_REFS[@]}" >&2
             exit 1
           fi
-          echo "tags:"
-          printf '  %s\n' "${TAG_FLAGS[@]}"
-          echo "sources:"
-          printf '  %s\n' "${SRC_REFS[@]}"
-          # Capture the manifest digest via --metadata-file directly from
-          # buildx instead of a post-hoc `imagetools inspect` of a tag —
-          # avoids an extra registry round-trip + the eventual-consistency
-          # race where the just-pushed manifest may not yet be readable.
-          # https://docs.docker.com/build/ci/github-actions/multi-platform/#distribute-build-across-multiple-runners
-          #
-          # NOTE on the jq path: `docker/build-push-action` writes
-          # `containerimage.digest` (flat). `docker buildx imagetools
-          # create --metadata-file` writes `containerimage.descriptor.digest`
-          # (nested). PR #27 used the flat key by mistake — jq returned
-          # null, the empty-digest guard below tripped with "failed to
-          # capture manifest digest from buildx --metadata-file", and
-          # every merge cell on main exited 1 (the per-arch count guard
-          # above was NOT involved — both arches built successfully).
-          # The // fallback covers both schemas in case buildx ever
-          # changes back.
+          echo "tags:";    printf '  %s\n' "${TAG_FLAGS[@]}"
+          echo "sources:"; printf '  %s\n' "${SRC_REFS[@]}"
           docker buildx imagetools create \
               --metadata-file /tmp/manifest-metadata.json \
               "${TAG_FLAGS[@]}" "${SRC_REFS[@]}"
+          # buildx --metadata-file uses the nested descriptor.digest key;
+          # the // fallback covers the flat key in case the schema changes.
           MANIFEST_DIGEST=$(jq -r '
               ."containerimage.descriptor".digest //
-              ."containerimage.digest" //
-              empty
+              ."containerimage.digest" // empty
           ' /tmp/manifest-metadata.json)
           if [ -z "$MANIFEST_DIGEST" ] || [ "$MANIFEST_DIGEST" = "null" ]; then
-            echo "ERROR: failed to capture manifest digest from buildx --metadata-file" >&2
+            echo "ERROR: failed to capture manifest digest" >&2
             cat /tmp/manifest-metadata.json >&2
             exit 1
           fi
           echo "digest=$MANIFEST_DIGEST" >> "$GITHUB_OUTPUT"
 
-      - name: Attest build provenance (on multi-arch manifest)
-        # Skip attestation when manifest step couldn't produce a digest —
-        # otherwise rolling-merge soft-failures emit a misleading second
-        # red annotation here.
+      - name: Attest build provenance (multi-arch manifest)
         if: steps.manifest.outputs.digest != ''
         uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
         with:
@@ -482,29 +220,18 @@ jobs:
           subject-digest: ${{ steps.manifest.outputs.digest }}
           push-to-registry: true
 
-      # ─ Keyless cosign signing on the multi-arch manifest digest ─────────
-      # `attest-build-provenance` and `cosign sign` are NOT duplicates:
-      #   * `attest-build-provenance` attaches an in-toto SLSA predicate
-      #     describing HOW the artefact was built (verifiable via
-      #     `gh attestation verify` or `cosign verify-attestation`).
-      #   * `cosign sign` attaches an OIDC-bound signature proving WHO/WHAT
-      #     workflow signed it (verifiable via `cosign verify` with the
-      #     workflow identity / certificate-identity-regexp).
-      # Both land in the Rekor transparency log; consumers may pin to
-      # either or both depending on their policy engine.
+      # attest-build-provenance (HOW it was built, in-toto SLSA predicate) and
+      # cosign sign (WHO/WHAT workflow signed it, OIDC-bound) are complementary
+      # — both land in Rekor; consumers may verify either or both.
       - name: Install cosign
         if: steps.manifest.outputs.digest != ''
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
-      - name: Sign manifest + per-platform children with cosign (keyless / OIDC)
+      - name: Sign manifest + per-arch children (keyless / OIDC)
         if: steps.manifest.outputs.digest != ''
         env:
           IMAGE_REF: ${{ inputs.registry }}/${{ inputs.image_name }}@${{ steps.manifest.outputs.digest }}
         run: |
-          # --recursive: also sign every child manifest of the index, so
-          # `cosign verify ghcr.io/.../glpi-php-fpm@<per-arch-digest>`
-          # keeps working for consumers that do arch-pinned verification
-          # (resolve tag → pull per-arch digest → verify). Index-only
-          # signing would silently break that admission-control pattern.
-          # Cost: 3 signatures total (1 index + 2 per-arch) — trivial.
+          # --recursive also signs each child manifest, so arch-pinned
+          # `cosign verify ...@<per-arch-digest>` keeps working.
           cosign sign --recursive --yes "$IMAGE_REF"

@@ -9,9 +9,10 @@ SHELL := /bin/bash
 # ────────────────────────────────────────────────────────────────────
 
 help: ## Show this help
-	@awk 'BEGIN {FS = ":.*?##"} /^[a-zA-Z_-]+:.*?##/ { printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
+	@printf 'glpi-docker-compose-stack — make targets\n\nUsage: make <target>\n\n'
+	@awk 'BEGIN {FS = ":.*?##"} /^[a-zA-Z_-]+:.*?##/ { printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 
-init: ## Bootstrap .env (APP_KEY + random DB passwords, idempotent)
+init: ## Bootstrap .env (random DB passwords, idempotent)
 	@./bin/init.sh
 
 up: .env ## Start the stack (detached)
@@ -50,41 +51,21 @@ ps: ## Show container status
 overlays: .env ## Show currently-enabled compose overlays
 	@./bin/compose-file.sh list
 
-enable-bugsink: .env ## Add self-hosted Bugsink overlay (in-stack error tracking, auto-DSN)
-	@./bin/compose-file.sh add examples/compose.bugsink.yml
-	@if grep -qE '^SENTRY_LARAVEL_DSN=.+$$' .env; then \
-	  printf '\033[1;33m[warn]\033[0m SENTRY_LARAVEL_DSN is set — the bugsink-init container will override it with the in-stack DSN.\n'; \
-	fi
-	@printf '\033[1;34m[next]\033[0m Fill BUGSINK_SECRET_KEY (openssl rand -base64 50), BUGSINK_ADMIN_EMAIL, BUGSINK_ADMIN_PASSWORD in .env, then `make up`.\n'
-
-disable-bugsink: .env ## Remove Bugsink overlay (BUGSINK_* env vars stay in .env)
-	@./bin/compose-file.sh remove examples/compose.bugsink.yml
-
-enable-sentry: .env ## Point error tracking at an external Sentry/Bugsink DSN. Usage: make enable-sentry DSN=https://...
-	@test -n "$(DSN)" || { printf '\033[1;31m[err]\033[0m Usage: make enable-sentry DSN=https://...\n' >&2; exit 1; }
-	@if ./bin/compose-file.sh list | grep -q '^examples/compose.bugsink.yml$$'; then \
-	  printf '\033[1;33m[warn]\033[0m bugsink overlay is enabled — its init container auto-seeds the DSN; this manual DSN will be ignored.\n'; \
-	fi
-	@./bin/env-set.sh SENTRY_LARAVEL_DSN "$(DSN)"
-
-disable-sentry: .env ## Clear SENTRY_LARAVEL_DSN (turns external error reporting off)
-	@./bin/env-set.sh SENTRY_LARAVEL_DSN ""
-
 enable-traefik: .env ## Add Traefik reverse-proxy overlay (TLS termination + label-based routing)
 	@./bin/compose-file.sh add examples/compose.traefik.yml
-	@printf '\033[1;34m[next]\033[0m Set SNIPEIT_HOST in .env to your public hostname (e.g. glpi.example.com), then `make up`. Requires an existing `traefik` external network.\n'
+	@printf '\033[1;34m[next]\033[0m Set GLPI_HOST in .env to your public hostname (e.g. glpi.example.com), then `make up`. Requires an existing `traefik` external network.\n'
 
 disable-traefik: .env ## Remove Traefik overlay
 	@./bin/compose-file.sh remove examples/compose.traefik.yml
 
 enable-caddy: .env ## Add Caddy reverse-proxy overlay (TLS termination + auto-HTTPS)
 	@./bin/compose-file.sh add examples/compose.caddy.yml
-	@printf '\033[1;34m[next]\033[0m Set SNIPEIT_HOST in .env to your public hostname (e.g. glpi.example.com), then `make up`.\n'
+	@printf '\033[1;34m[next]\033[0m Set GLPI_HOST in .env to your public hostname (e.g. glpi.example.com), then `make up`.\n'
 
 disable-caddy: .env ## Remove Caddy overlay
 	@./bin/compose-file.sh remove examples/compose.caddy.yml
 
-enable-observability: .env ## Add Prometheus + exporters overlay (php-fpm + nginx metrics)
+enable-observability: .env ## Add Prometheus + Grafana overlay (MariaDB + nginx metrics)
 	@./bin/compose-file.sh add examples/compose.observability.yml
 	@printf '\033[1;34m[next]\033[0m The nginx /stub_status endpoint is NOT enabled by default — see the overlay header for the two opt-in paths.\n'
 
@@ -137,11 +118,13 @@ test-image: ## Build runtime image + run container-structure-test (image-surface
 	  || { echo "Install: https://github.com/GoogleContainerTools/container-structure-test/releases"; exit 1; }
 	container-structure-test test --image glpi-php-fpm:test --config tests/container-structure-test.yaml
 
-test-glpi: ## Build tester stage — runs GLPI's own phpunit suite, fails the build on any failure
-	docker buildx build --target tester --platform linux/amd64 .
-
 test-bats: ## Run bats regression suite for bin/ helpers (uses bats/bats Docker image — no local install)
 	docker run --rm -v "$(CURDIR)":/code -w /code bats/bats:latest tests/bin/
+
+hardening-check: ## Assert every overlay keeps no-new-privileges + cap_drop:[ALL] (tests/lint/hardening-check.sh)
+	./tests/lint/hardening-check.sh
+
+test: test-image test-bats hardening-check ## Run the local test suite (image surface + bats + overlay hardening)
 
 # ────────────────────────────────────────────────────────────────────
 # Dev convenience
@@ -156,10 +139,17 @@ dev: ## Seed compose.override.yml from the example (if missing) + `make up`
 	fi
 	$(MAKE) up
 
-build: ## Build the runtime image locally (glpi-php-fpm:local) — no push
+build: ## Build the runtime image locally (glpi-php-fpm:local, supply-chain-pinned) — no push
+	@v=$$(tr -d '[:space:]' < .glpi-version); \
+	url="https://github.com/glpi-project/glpi/releases/download/$$v/glpi-$$v.tgz"; \
+	printf '\033[1;34m[build]\033[0m resolving sha256 of %s\n' "$$url"; \
+	sha=$$(curl -fsSL "$$url" | sha256sum | cut -d' ' -f1); \
+	[ -n "$$sha" ] || { printf '\033[1;31m[build]\033[0m could not hash %s\n' "$$url" >&2; exit 1; }; \
+	printf '\033[1;34m[build]\033[0m GLPI %s  sha256=%s\n' "$$v" "$$sha"; \
 	docker buildx build --target runtime --platform linux/amd64 --load \
 		-t glpi-php-fpm:local \
-		--build-arg GLPI_VERSION=$$(cat .glpi-version) .
+		--build-arg GLPI_VERSION="$$v" \
+		--build-arg GLPI_SHA256="$$sha" .
 
 lint: ## Run hadolint + shellcheck + yamllint via Docker (no local install)
 	@printf '\033[1;34m[lint]\033[0m hadolint Dockerfile\n'
@@ -192,11 +182,8 @@ upgrade: pull up logs-app ## Pull + recreate + follow logs
 shell: ## Shell into the app container
 	docker compose exec app sh
 
-artisan: ## Run an artisan command (use: make artisan CMD="route:list")
-	docker compose exec app php /var/www/html/artisan $(CMD)
-
-tinker: ## Open an interactive REPL inside the app container (php artisan tinker)
-	docker compose exec app php /var/www/html/artisan tinker
+console: ## Run a GLPI console command (use: make console CMD="cache:configure --help")
+	docker compose exec -u www-data app php bin/console $(CMD)
 
 restore: ## Print pointer to the disaster-recovery runbook (not automated)
 	@printf '\033[1;33m[restore]\033[0m This target intentionally does NOT automate restore.\n'
@@ -215,12 +202,10 @@ clean: ## DESTRUCTIVE: down + delete ALL volumes (db + uploads + backups)
 .PHONY: \
 	help init up down restart logs logs-app ps \
 	backup backup-list backup-verify \
-	health test-image test-glpi \
+	health test test-image test-glpi test-bats hardening-check \
 	dev build lint pull upgrade \
-	shell artisan tinker restore clean \
+	shell console restore clean \
 	overlays \
-	enable-bugsink disable-bugsink \
-	enable-sentry disable-sentry \
 	enable-traefik disable-traefik \
 	enable-caddy disable-caddy \
 	enable-observability disable-observability

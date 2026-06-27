@@ -1,18 +1,22 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Netresearch DTT GmbH
 
-# prometheus.yml — minimal scrape config for the glpi observability overlay
+# prometheus.yml — scrape config for the glpi observability overlay
 #
-# Scrapes:
-#   - php-fpm-exporter on :9253 (php-fpm pool stats via unix socket)
-#   - nginx-prometheus-exporter on :9113 (nginx stub_status — requires
-#     /stub_status to be enabled in nginx; see compose.observability.yml)
+# GLPI itself has no metrics endpoint, so Prometheus watches the
+# infrastructure tiers via their exporters:
+#   - mysqld-exporter on :9104 (MariaDB server metrics) ........... DB tier
+#   - nginx-prometheus-exporter on :9113 (nginx stub_status) ...... web tier
+#     (requires /stub_status enabled in nginx — see compose.observability.yml)
 #   - prometheus itself on :9090 (self-monitoring)
+#   - cadvisor on :8080 (per-container CPU/memory/IO) ............. container tier
+#     (OPT-IN — the cadvisor service is commented out in the overlay because it
+#     needs a privileged container; the job below is commented to match)
 #
 # All targets live on the `glpi` docker network and are reached by their
-# compose service name. No remote_write, no alerting — this file is the
-# floor for adding Grafana, Alertmanager, or remote storage in a separate
-# overlay.
+# compose service name. No remote_write, no alerting — this file is the floor
+# for adding Alertmanager or remote storage in a separate overlay. Grafana
+# (also in the overlay) reads these series via the provisioned datasource.
 
 global:
   scrape_interval: 30s
@@ -27,12 +31,12 @@ scrape_configs:
       - targets:
           - localhost:9090
 
-  - job_name: php-fpm
+  - job_name: mariadb
     static_configs:
       - targets:
-          - php-fpm-exporter:9253
+          - mysqld-exporter:9104
         labels:
-          service: glpi-app
+          service: glpi-db
 
   - job_name: nginx
     static_configs:
@@ -40,3 +44,12 @@ scrape_configs:
           - nginx-prometheus-exporter:9113
         labels:
           service: glpi-web
+
+  # Container-tier metrics — OPT-IN. Uncomment together with the cadvisor
+  # service + its prometheus depends_on in examples/compose.observability.yml.
+  # - job_name: cadvisor
+  #   static_configs:
+  #     - targets:
+  #         - cadvisor:8080
+  #       labels:
+  #         service: glpi-containers

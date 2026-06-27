@@ -23,7 +23,7 @@ services:
     labels:
       traefik.enable: "true"
       traefik.docker.network: traefik
-      traefik.http.routers.glpi.rule: Host(`${SNIPEIT_HOST:-glpi.example.com}`)
+      traefik.http.routers.glpi.rule: Host(`${GLPI_HOST:-glpi.example.com}`)
       traefik.http.routers.glpi.entrypoints: websecure
       traefik.http.routers.glpi.tls: "true"
       traefik.http.routers.glpi.tls.certresolver: letsencrypt

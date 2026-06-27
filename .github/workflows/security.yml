@@ -1,15 +1,20 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Netresearch DTT GmbH
 #
-# CVE scanning for the published glpi-php-fpm images.
+# CVE scanning for the published glpi-php-fpm image.
 #
 # Runs:
-#   - Trivy container scan against :latest and :rolling — delegated to
-#     the reusable security-container.yml in netresearch/.github
-#     (HIGH/CRITICAL → SARIF, exit-code 0 = informational).
-#   - osv-scanner against the composer.lock baked into each image
-#     (informational; stays inline because composer.lock extraction is
-#     glpi-specific and not part of the container reusable surface).
+#   - Trivy container scan against :latest — delegated to the reusable
+#     security-container.yml in netresearch/.github (HIGH/CRITICAL → SARIF,
+#     exit-code 0 = informational). Trivy walks the whole image filesystem,
+#     so it also enumerates GLPI's bundled PHP dependencies via
+#     vendor/composer/installed.json — no separate lockfile job is needed.
+#
+# Note: the GLPI image is built FROM the upstream release tarball, which
+# ships vendor/ but NO root composer.lock — so (unlike a Composer-built
+# app) there is nothing extra to scan beyond what Trivy already covers.
+# There is also no `:rolling` deps line; the floating tags are rebuilt
+# daily to pick up base-image CVEs.
 #
 # Scope is intentionally limited to vulnerability scanning. Scorecard,
 # cosign signing/verification, and SBOM attestation live in separate
@@ -37,81 +42,18 @@ concurrency:
   group: security-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
-env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository_owner }}/glpi-php-fpm
-
 jobs:
   trivy:
-    # On workflow_run, only run if the upstream build actually succeeded.
-    # `rolling` may not exist in ghcr.io (rolling builds can fail when
-    # upstream GLPI's composer.json references a CVE-blocked major).
-    # The reusable's `tolerate-pull-failure` input handles the missing-
-    # image case via a pre-flight `docker manifest inspect` probe — when
-    # the manifest is unavailable, the Trivy + SARIF-upload steps are
-    # skipped and the job exits green. Job-level `continue-on-error:` is
-    # forbidden by GitHub on reusable-caller jobs, which is why this knob
-    # lives inside the reusable.
+    # On workflow_run, only run if the upstream build actually succeeded
+    # (the build job pushed the fresh :latest image to ghcr.io). Running on
+    # `push` would race the build and try to scan a tag that doesn't exist.
     if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
-    name: trivy (${{ matrix.tag }})
+    name: trivy (latest)
     permissions:
       contents: read
       packages: read           # pull from ghcr.io (private/org-locked packages)
       security-events: write   # SARIF upload to GitHub code-scanning
-    strategy:
-      fail-fast: false
-      matrix:
-        # `latest`  = pinned-deps release line (canonical)
-        # `rolling` = rolling-deps line (catches transitive CVEs; may be absent)
-        tag: [latest, rolling]
     uses: netresearch/.github/.github/workflows/security-container.yml@main
     with:
-      image-ref: ghcr.io/${{ github.repository_owner }}/glpi-php-fpm:${{ matrix.tag }}
-      sarif-category: trivy-${{ matrix.tag }}
-      tolerate-pull-failure: ${{ matrix.tag == 'rolling' }}
-
-  osv-scanner:
-    # Same gate as trivy — only run on workflow_run if build succeeded.
-    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
-    name: osv-scanner (${{ matrix.tag }} composer.lock)
-    runs-on: ubuntu-latest
-    # Same rationale as trivy — rolling image may not exist; don't propagate.
-    continue-on-error: ${{ matrix.tag == 'rolling' }}
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        tag: [latest, rolling]
-    steps:
-      - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-
-      - name: Extract composer.lock from image
-        env:
-          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.tag }}
-        run: |
-          set -eux
-          mkdir -p osv-input
-          docker pull "$IMAGE"
-          CID=$(docker create "$IMAGE")
-          # GLPI app code lives at /var/www/html (see Dockerfile runtime stage).
-          # composer.lock is committed upstream when ROLLING_DEPS=false (pinned line)
-          # and re-generated when ROLLING_DEPS=true (rolling line) — either way the
-          # final image ships with one.
-          docker cp "$CID":/var/www/html/composer.lock osv-input/composer.lock
-          docker rm "$CID" >/dev/null
-          ls -l osv-input/
-
-      - name: osv-scanner — composer.lock (informational)
-        # Informational only — same rationale as the Trivy step: the
-        # composer.lock is upstream GLPI's; we can't fix CVEs in it.
-        # Daily-cron output is the alert surface. Operators triage via
-        # the GitHub Actions job log.
-        continue-on-error: true
-        uses: google/osv-scanner-action/osv-scanner-action@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
-        with:
-          scan-args: |-
-            --lockfile=osv-input/composer.lock
+      image-ref: ghcr.io/${{ github.repository_owner }}/glpi-php-fpm:latest
+      sarif-category: trivy-latest

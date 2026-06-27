@@ -1,20 +1,50 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Netresearch DTT GmbH
 
-# compose.observability.yml — Prometheus + exporters overlay
+# compose.observability.yml — Prometheus + exporters + Grafana overlay
 #
 # Usage:
 #   docker compose -f compose.yml -f examples/compose.observability.yml up -d
 #
-# Adds three services to the glpi stack:
-#   - php-fpm-exporter (:9253) — scrapes php-fpm via the shared unix socket;
-#     the /fpm-status endpoint is already enabled by rootfs's zz-glpi.conf
-#   - nginx-prometheus-exporter (:9113) — scrapes nginx /stub_status
-#   - prometheus (:9090) — scrapes the two exporters + itself
+# GLPI core exposes NO Prometheus/metrics endpoint, so there is no "app"
+# exporter to add — instead this overlay watches the stack's infrastructure
+# tiers (DB + web active by default; container metrics opt-in, see below):
 #
-# This overlay is intentionally minimal. Grafana, Alertmanager, Loki,
-# remote_write, and PromQL alert rules belong in a separate overlay so an
-# operator can mix and match.
+#   - mysqld-exporter (:9104)            — MariaDB server metrics  [DB tier]
+#   - nginx-prometheus-exporter (:9113)  — nginx stub_status       [web tier]
+#   - prometheus (:9090)                 — scrapes the exporters + itself, 15d TSDB
+#   - grafana (:3000)                    — dashboards over Prometheus
+#
+# Container-tier metrics (cadvisor) are provided as a commented-out OPT-IN block
+# at the bottom of the services list: cadvisor needs `privileged: true` to read
+# host cgroups, so it cannot meet this stack's hardening posture (the
+# tests/lint/hardening-check.sh CI gate would reject it). Enable it knowingly —
+# see that block and the matching `cadvisor` job in prometheus.yml.
+#
+# Optional env (inline defaults shown — add to .env to override):
+#   PROMETHEUS_HTTP_PORT=9090
+#   GRAFANA_HTTP_PORT=3000
+#   GRAFANA_ADMIN_USER=admin
+#   GRAFANA_ADMIN_PASSWORD=admin      # CHANGE THIS — see grafana service below
+#
+# Prometheus + Grafana publish to 127.0.0.1 only (admin surfaces). Reach them
+# over an SSH tunnel, or route them through a reverse-proxy overlay
+# (examples/compose.traefik.yml / compose.caddy.yml) for authenticated remote
+# access. Do not expose them to the internet unauthenticated.
+#
+# -------------------------------------------------------------------------
+# HARDENING POSTURE — RESTATED (compose anchors are file-local)
+# -------------------------------------------------------------------------
+# The base compose.yml hardens every service (no-new-privileges, cap_drop
+# ALL, explicit mem_limit/cpus, json-file log rotation) and shares the log
+# policy through the `x-logging` YAML anchor. Anchors and `<<:` merges DO NOT
+# cross file boundaries — a `*logging` reference here would be an undefined
+# alias — so each service below re-declares its logging + resource limits +
+# security options inline (no-new-privileges + cap_drop: ALL). Every ACTIVE
+# service here carries that posture and passes tests/lint/hardening-check.sh.
+# The sole exception, `cadvisor`, cannot (it needs host privileges) and is
+# therefore shipped commented-out / opt-in rather than weakening the posture.
+# -------------------------------------------------------------------------
 #
 # -------------------------------------------------------------------------
 # nginx /stub_status caveat — READ BEFORE STARTING THIS OVERLAY
@@ -43,10 +73,12 @@
 
 services:
   # ---------------------------------------------------------------------
-  # php-fpm exporter — reads pool stats via the shared unix socket
+  # MariaDB exporter — DB tier metrics (connections, InnoDB buffer pool,
+  # query rates, replication). Connects to the `db` service over the shared
+  # network as a regular MySQL client.
   # ---------------------------------------------------------------------
-  php-fpm-exporter:
-    image: hipages/php-fpm_exporter:2
+  mysqld-exporter:
+    image: prom/mysqld-exporter:v0.19.0
     restart: unless-stopped
     mem_limit: 64m
     cpus: 0.25
@@ -56,22 +88,30 @@ services:
         max-size: "10m"
         max-file: "5"
     depends_on:
-      app:
+      db:
         condition: service_healthy
+    command:
+      - --mysqld.address=db:3306
+      - --mysqld.username=${GLPI_DB_USER:-glpi}
+      - --web.listen-address=:9104
     environment:
-      # The exporter speaks FastCGI directly to the pool's status page.
-      # Format: <socket>;<status-path>  — both must match zz-glpi.conf
-      # (listen=/run/php-fpm/glpi.sock, pm.status_path=/fpm-status).
-      PHP_FPM_SCRAPE_URI: "unix:///run/php-fpm/glpi.sock;/fpm-status"
-      PHP_FPM_WEB_LISTEN_ADDRESS: ":9253"
-      PHP_FPM_LOG_LEVEL: "info"
-    volumes:
-      # Read-only mount of the same tmpfs volume `app` writes the socket to.
-      # The socket is mode 0666 (see zz-glpi.conf) so the exporter's
-      # non-root uid can connect() even though the volume is :ro.
-      - fpm-sock:/run/php-fpm:ro
-    # NOTE: image is distroless (no shell, no wget/curl) — no healthcheck.
-    # Prometheus's `up` metric serves as the liveness signal instead.
+      # Password for the user above, read by the exporter from this env var
+      # (the documented alternative to embedding credentials in a DSN string).
+      #
+      # Defaults to the GLPI application user so the overlay runs with ZERO
+      # extra DB setup. That user covers the default-enabled collectors
+      # (global status/variables, InnoDB), but is under-privileged for the
+      # server-wide ones (processlist, replication). For full coverage create
+      # a dedicated monitoring user once:
+      #
+      #   CREATE USER 'exporter'@'%' IDENTIFIED BY '<pw>'
+      #     WITH MAX_USER_CONNECTIONS 3;
+      #   GRANT PROCESS, REPLICATION CLIENT, SELECT ON *.* TO 'exporter'@'%';
+      #
+      # then set --mysqld.username=exporter above and point this var at <pw>.
+      MYSQLD_EXPORTER_PASSWORD: ${GLPI_DB_PASSWORD:-}
+    # Minimal image with no shell/wget — no in-container healthcheck; the
+    # Prometheus `up{job="mariadb"}` series is the liveness signal instead.
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -81,10 +121,12 @@ services:
       - glpi
 
   # ---------------------------------------------------------------------
-  # nginx exporter — scrapes /stub_status (see caveat at top of file)
+  # nginx exporter — web tier metrics. Scrapes /stub_status on the `web`
+  # service (see the caveat block at the top of this file — you must enable
+  # stub_status in the nginx config first).
   # ---------------------------------------------------------------------
   nginx-prometheus-exporter:
-    image: nginx/nginx-prometheus-exporter:1.5
+    image: nginx/nginx-prometheus-exporter:1.5.1
     restart: unless-stopped
     mem_limit: 64m
     cpus: 0.25
@@ -99,7 +141,7 @@ services:
     command:
       - --nginx.scrape-uri=http://web/stub_status
       - --web.listen-address=:9113
-    # NOTE: image is distroless — no healthcheck.
+    # Distroless image — no healthcheck; Prometheus `up` serves as liveness.
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -109,10 +151,58 @@ services:
       - glpi
 
   # ---------------------------------------------------------------------
-  # Prometheus — TSDB + scrape engine
+  # cadvisor — container-tier metrics (per-container CPU, memory, network,
+  # filesystem) for every service in the stack.  ***OPT-IN / DISABLED BY DEFAULT***
+  #
+  # DELIBERATE HARDENING EXCEPTION: reading host cgroup/kernel interfaces
+  # requires `privileged: true`, so cadvisor canNOT carry cap_drop: ALL +
+  # no-new-privileges like every other service here — it would fail the
+  # tests/lint/hardening-check.sh CI gate. Rather than weaken the posture or
+  # ship a privileged container by default, the service is left commented out.
+  #
+  # TO ENABLE container metrics (accepting a privileged container whose blast
+  # radius is contained by READ-ONLY host mounts + --docker_only):
+  #   1. Uncomment the `cadvisor:` service block below.
+  #   2. Uncomment the `cadvisor` depends_on entry under `prometheus:`.
+  #   3. Uncomment the `cadvisor` job in config/prometheus/prometheus.yml.
+  #   4. Add `cadvisor` to the privileged-exception allowlist if/when the
+  #      hardening-check gains one, or run the gate with this overlay excluded.
+  # ---------------------------------------------------------------------
+  # cadvisor:
+  #   image: gcr.io/cadvisor/cadvisor:v0.60.3
+  #   restart: unless-stopped
+  #   mem_limit: 256m
+  #   cpus: 0.5
+  #   logging:
+  #     driver: json-file
+  #     options:
+  #       max-size: "10m"
+  #       max-file: "5"
+  #   command:
+  #     - --docker_only=true            # ignore non-docker cgroups (less noise)
+  #     - --housekeeping_interval=30s   # sample cadence ~= prometheus scrape
+  #     - --store_container_labels=false
+  #   privileged: true
+  #   devices:
+  #     - /dev/kmsg:/dev/kmsg
+  #   volumes:
+  #     - /:/rootfs:ro
+  #     - /var/run:/var/run:ro
+  #     - /sys:/sys:ro
+  #     - /var/lib/docker/:/var/lib/docker:ro
+  #     - /dev/disk/:/dev/disk:ro
+  #   # cadvisor serves its UI + /metrics on :8080; only Prometheus consumes it
+  #   # over the docker network, so no host port is published. The image ships
+  #   # its own HEALTHCHECK against /healthz.
+  #   networks:
+  #     - glpi
+
+  # ---------------------------------------------------------------------
+  # Prometheus — TSDB + scrape engine. Scrapes the active exporters above and
+  # itself; scrape config in config/prometheus/prometheus.yml.
   # ---------------------------------------------------------------------
   prometheus:
-    image: prom/prometheus:v3.5.3
+    image: prom/prometheus:v3.5.4
     restart: unless-stopped
     mem_limit: 512m
     cpus: 1.0
@@ -122,10 +212,14 @@ services:
         max-size: "10m"
         max-file: "5"
     depends_on:
-      php-fpm-exporter:
+      mysqld-exporter:
         condition: service_started
       nginx-prometheus-exporter:
         condition: service_started
+      # Uncomment together with the cadvisor service block above to enable
+      # container-tier metrics:
+      # cadvisor:
+      #   condition: service_started
     command:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.path=/prometheus
@@ -137,7 +231,9 @@ services:
       - ./config/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prom-data:/prometheus
     ports:
-      - "${PROMETHEUS_HTTP_PORT:-9090}:9090"
+      # Loopback-only — Prometheus has no auth of its own. Tunnel in, or front
+      # it with a reverse-proxy overlay for authenticated remote access.
+      - "127.0.0.1:${PROMETHEUS_HTTP_PORT:-9090}:9090"
     healthcheck:
       # prom/prometheus is built on busybox — wget is available.
       test: ["CMD", "wget", "-qO-", "--spider", "http://127.0.0.1:9090/-/healthy"]
@@ -152,6 +248,66 @@ services:
     networks:
       - glpi
 
+  # ---------------------------------------------------------------------
+  # Grafana — dashboards over Prometheus. The Prometheus datasource is
+  # auto-provisioned from config/grafana/provisioning (mounted read-only);
+  # import dashboards by ID from grafana.com (IDs listed on the volume mount).
+  # ---------------------------------------------------------------------
+  grafana:
+    image: grafana/grafana-oss:13.0.2
+    restart: unless-stopped
+    mem_limit: 512m
+    cpus: 0.5
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    environment:
+      # First-boot admin credentials. CHANGE THE PASSWORD: set
+      # GRAFANA_ADMIN_PASSWORD in .env — the admin/admin default forces a
+      # password change on first login but must never reach production.
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      # Lock the instance down: no self-service signups, no anonymous access,
+      # no phone-home.
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      # If you mount Grafana on a sub-path behind the reverse proxy, also set
+      # GF_SERVER_ROOT_URL (e.g. https://glpi.example.com/grafana/) in .env.
+      TZ: ${TZ:-UTC}
+    volumes:
+      - grafana-data:/var/lib/grafana
+      # Datasource provisioning (read-only). Import dashboards by ID from
+      # grafana.com — recommended starters for this exporter set:
+      #   - MariaDB / MySQL overview ........ 14057
+      #   - nginx-prometheus-exporter ....... 12708
+      #   - cadvisor / docker containers .... 19792
+      - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
+    ports:
+      # Loopback-only — same rationale as Prometheus above.
+      - "127.0.0.1:${GRAFANA_HTTP_PORT:-3000}:3000"
+    healthcheck:
+      # grafana-oss is alpine-based — wget (busybox) is available.
+      test: ["CMD", "wget", "-qO-", "--spider", "http://127.0.0.1:3000/api/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    networks:
+      - glpi
+
 volumes:
   prom-data:
     name: glpi-prom-data
+  grafana-data:
+    name: glpi-grafana-data

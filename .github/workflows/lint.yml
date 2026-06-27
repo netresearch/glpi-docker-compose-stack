@@ -17,9 +17,9 @@
 #                        to enforce security_opt:[no-new-privileges:true] +
 #                        cap_drop:[ALL] on every long-running service that
 #                        an examples/compose.*.yml overlay introduces.
-#                        Background: PR #21's audit caught the Bugsink
-#                        overlay initially shipping without hardening
-#                        because compose anchors don't survive overlays.
+#                        Background: an overlay can ship a service without
+#                        hardening because compose anchors do not survive
+#                        across separate overlay files — this gate catches it.
 #   - yamllint         → stays inline. The repo has no .yamllint.yml config
 #                        file; rules are passed via config_data here to keep
 #                        the contract local.
@@ -60,9 +60,9 @@ jobs:
         run: |
           cp .env.example .env
           # supply just-good-enough placeholders so validation passes
+          # (GLPI has no APP_KEY — its crypt key is generated on first boot)
           sed -i \
-            -e 's/^APP_KEY=$/APP_KEY=base64:CI_PLACEHOLDER_KEY_NOT_FOR_RUNTIME_USE_ONLY===/' \
-            -e 's/^DB_PASSWORD=$/DB_PASSWORD=ci-placeholder/' \
+            -e 's/^GLPI_DB_PASSWORD=$/GLPI_DB_PASSWORD=ci-placeholder/' \
             -e 's/^DB_ROOT_PASSWORD=$/DB_ROOT_PASSWORD=ci-placeholder/' \
             .env
           docker compose config --quiet

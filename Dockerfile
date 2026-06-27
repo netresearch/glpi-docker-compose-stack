@@ -43,18 +43,17 @@ ARG GLPI_SHA256=""
 
 RUN set -eux; \
     apk add --no-cache curl ca-certificates tar; \
-    cd /tmp; \
-    curl -fsSL -o glpi.tgz \
+    curl -fsSL -o /tmp/glpi.tgz \
         "https://github.com/glpi-project/glpi/releases/download/${GLPI_VERSION}/glpi-${GLPI_VERSION}.tgz"; \
     if [ -n "${GLPI_SHA256}" ]; then \
-        echo "${GLPI_SHA256}  glpi.tgz" | sha256sum -c -; \
+        echo "${GLPI_SHA256}  /tmp/glpi.tgz" | sha256sum -c -; \
     else \
         echo "[fetch] GLPI_SHA256 not provided — skipping integrity check (set it in CI)"; \
     fi; \
     mkdir -p /opt/glpi; \
     # The tarball's top-level dir is `glpi/` — strip it so the app root is /opt/glpi.
-    tar xzf glpi.tgz -C /opt/glpi --strip-components=1; \
-    rm -f glpi.tgz; \
+    tar xzf /tmp/glpi.tgz -C /opt/glpi --strip-components=1; \
+    rm -f /tmp/glpi.tgz; \
     # Sanity: the bundled dist must carry vendor/, the public/ docroot and the CLI.
     test -f /opt/glpi/public/index.php; \
     test -f /opt/glpi/bin/console; \
@@ -130,7 +129,7 @@ RUN set -eux; \
     # Fail the build loudly if any required extension is missing. `php -m`
     # lists OPcache as "Zend OPcache", so it is checked separately below
     # rather than as a bare "opcache" line.
-    && php -m | tr 'A-Z' 'a-z' | sort > /tmp/mods \
+    && php -m | tr '[:upper:]' '[:lower:]' | sort > /tmp/mods \
     && for ext in bcmath ctype curl dom exif fileinfo filter gd iconv intl \
                   ldap mbstring mysqli openssl redis session simplexml sodium \
                   tokenizer zip zlib; do \

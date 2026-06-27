@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Netresearch DTT GmbH
+#
+# Grafana datasource provisioning — auto-wires the Prometheus instance from
+# compose.observability.yml as the default datasource on first boot. Grafana
+# reads every *.yml under /etc/grafana/provisioning/datasources/ at startup,
+# so no manual "Add data source" click is needed.
+# https://grafana.com/docs/grafana/latest/administration/provisioning/#data-sources
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    # Service name on the shared `glpi` docker network (compose.observability.yml).
+    url: http://prometheus:9090
+    isDefault: true
+    # Managed declaratively by this file — disable UI editing so it can't drift.
+    editable: false
+    jsonData:
+      # Match prometheus.yml `scrape_interval` so Grafana's $__rate_interval
+      # range math lines up with the real sample cadence.
+      timeInterval: 30s

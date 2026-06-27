@@ -2,71 +2,174 @@
 # Copyright (c) 2026 Netresearch DTT GmbH
 #
 # container-structure-test surface tests for the glpi-php-fpm image.
-# Run locally: make test-image
-# Tool: https://github.com/GoogleContainerTools/container-structure-test
+#
+# These assert the IMAGE INVARIANTS — the contract compose.yml depends on:
+# where the GLPI code lives, which PHP extensions are compiled in, the
+# php-fpm / php.ini overlays, the relocated writable state dirs and their
+# www-data ownership, and the process metadata (workdir, entrypoint, cmd,
+# GLPI_*_DIR env, OCI labels). It is a fast, hermetic check that runs WITHOUT
+# a database — it inspects the image only, it never boots the full app.
+#
+# Run locally:  make test-image   (builds glpi-php-fpm:test, then runs this)
+# Tool:         https://github.com/GoogleContainerTools/container-structure-test
+#
+# Deliberately NOT covered here (and why):
+#   * STOPSIGNAL (SIGQUIT) and the HEALTHCHECK (cgi-fcgi /ping over the unix
+#     socket) are set in the Dockerfile but have no field in
+#     container-structure-test's metadataTest schema. They are exercised by
+#     the smoke-test workflow (the running container must report healthy) and
+#     pinned by the Dockerfile itself. The cgi-fcgi binary the healthcheck
+#     shells out to IS asserted below.
+#   * The upstream php-fpm base image carries a vestigial `EXPOSE 9000`. This
+#     stack does NOT serve over TCP — php-fpm listens on a unix socket (see
+#     rootfs zz-glpi.conf), which tests/lint/hardening-check.sh enforces.
+#     exposedPorts is intentionally left untested so this file never implies
+#     TCP is the serving path.
 
 schemaVersion: 2.0.0
 
 commandTests:
-  - name: php version is 8.5+
+  # PHP major.minor. GLPI 11.0.x is validated upstream on PHP 8.2-8.4; this
+  # image pins 8.4 (8.5 is intentionally not the default — not yet validated
+  # against GLPI 11.0.x). Match the line, not a patch level.
+  - name: php is 8.4.x
     command: php
     args: ["-v"]
-    expectedOutput: ["PHP 8\\.5\\."]
+    expectedOutput: ["PHP 8\\.4\\."]
 
-  - name: required PHP extensions loaded
+  # Every PHP extension GLPI 11 needs must be compiled in. Notes:
+  #   * `php -m` prints OPcache as the Zend extension "Zend OPcache", not a
+  #     bare "opcache" line — match the real string.
+  #   * GLPI talks to MariaDB/MySQL through mysqli (NOT pdo_mysql).
+  #   * redis is the phpredis extension backing the Valkey cache; without it
+  #     `bin/console cache:configure redis://…` refuses the DSN.
+  - name: required PHP extensions are loaded
     command: php
     args: ["-m"]
-    # PHP 8.5 lists opcache as "Zend OPcache" (Zend extension) — regex
-    # matches that. Other entries are regular PHP modules.
     expectedOutput:
       - "bcmath"
+      - "bz2"
+      - "exif"
       - "gd"
       - "intl"
       - "ldap"
       - "mbstring"
-      - "Zend OPcache"
-      - "pdo_mysql"
+      - "mysqli"
       - "redis"
+      - "sodium"
       - "zip"
+      - "Zend OPcache"
 
-  - name: artisan boots without fatals
+  # The bundled GLPI CLI boots without a fatal — proves the application code
+  # and the tarball-shipped vendor/ are intact and parseable. CST runs as root
+  # (the image has no USER directive) and GLPI's console refuses to run as
+  # root without --allow-superuser. Match "GLPI CLI" (version-independent)
+  # rather than pinning the version printed after it.
+  - name: GLPI console boots
     command: php
-    args: ["/var/www/html/artisan", "--version"]
-    expectedOutput: ["Laravel Framework"]
+    args: ["/var/www/glpi/bin/console", "--version", "--allow-superuser"]
+    expectedOutput: ["GLPI CLI"]
 
-  - name: composer install completed (vendor present)
+  # vendor/ is shipped inside the GLPI release tarball — there is NO composer
+  # step in the build, so its presence is a build-correctness invariant.
+  - name: bundled vendor/ present
     command: test
-    args: ["-d", "/var/www/html/vendor"]
+    args: ["-d", "/var/www/glpi/vendor"]
     exitCode: 0
 
-  - name: deps manifest written
-    command: test
-    args: ["-s", "/var/lib/glpi/deps.txt"]
-    exitCode: 0
+  # The four writable state dirs are relocated OFF the read-only code root and
+  # must be owned by www-data, so a freshly-mounted named volume is writable by
+  # the php-fpm workers on first boot (entrypoint.sh re-applies this for
+  # bind-mounts/tmpfs, but the image baseline must already be correct).
+  - name: config dir owned by www-data
+    command: stat
+    args: ["-c", "%U:%G", "/etc/glpi"]
+    expectedOutput: ["www-data:www-data"]
+  - name: files dir owned by www-data
+    command: stat
+    args: ["-c", "%U:%G", "/var/lib/glpi/files"]
+    expectedOutput: ["www-data:www-data"]
+  - name: plugins dir owned by www-data
+    command: stat
+    args: ["-c", "%U:%G", "/var/lib/glpi/plugins"]
+    expectedOutput: ["www-data:www-data"]
+  - name: log dir owned by www-data
+    command: stat
+    args: ["-c", "%U:%G", "/var/log/glpi"]
+    expectedOutput: ["www-data:www-data"]
 
 fileExistenceTests:
-  - name: entrypoint
+  # --- GLPI application code (unpacked from the release tarball) ---
+  - name: public docroot entrypoint
+    path: /var/www/glpi/public/index.php
+    shouldExist: true
+  - name: GLPI console
+    path: /var/www/glpi/bin/console
+    shouldExist: true
+
+  # --- container plumbing ---
+  - name: entrypoint (executable)
     path: /usr/local/bin/entrypoint.sh
     shouldExist: true
     permissions: "-rwxr-xr-x"
-  - name: healthcheck binary (cgi-fcgi)
-    path: /usr/bin/cgi-fcgi
-    shouldExist: true
-  - name: tini
+  - name: tini (PID 1 / signal forwarder)
     path: /sbin/tini
     shouldExist: true
-  - name: artisan
-    path: /var/www/html/artisan
+  - name: cgi-fcgi (healthcheck dependency)
+    path: /usr/bin/cgi-fcgi
     shouldExist: true
-  - name: glpi php-fpm pool override
+
+  # --- PHP / php-fpm config overlays (copied from rootfs/) ---
+  - name: php-fpm pool override
     path: /usr/local/etc/php-fpm.d/zz-glpi.conf
     shouldExist: true
-  - name: glpi php.ini override
+  - name: php.ini override
     path: /usr/local/etc/php/conf.d/glpi.ini
     shouldExist: true
 
+  # --- relocated writable state dirs (presence; ownership asserted above) ---
+  - name: config dir exists
+    path: /etc/glpi
+    shouldExist: true
+  - name: files dir exists
+    path: /var/lib/glpi/files
+    shouldExist: true
+  - name: plugins dir exists
+    path: /var/lib/glpi/plugins
+    shouldExist: true
+  - name: log dir exists
+    path: /var/log/glpi
+    shouldExist: true
+
 metadataTest:
-  exposedPorts: ["9000"]
-  workdir: /var/www/html
+  workdir: /var/www/glpi
   entrypoint: ["/sbin/tini", "--", "/usr/local/bin/entrypoint.sh"]
   cmd: ["php-fpm", "--nodaemonize"]
+  # GLPI_*_DIR tell GLPI where its config/files/plugins/logs live OUTSIDE the
+  # read-only code root. They are load-bearing: php-fpm forwards them through
+  # clear_env (see rootfs zz-glpi.conf), and without them GLPI would try to
+  # write under /var/www/glpi and crash. Assert the exact paths.
+  #
+  # NOTE: the field is `envVars` (the v2 schema's key), NOT `env` — the latter
+  # parses cleanly in the README but is rejected by the binary.
+  envVars:
+    - key: GLPI_CONFIG_DIR
+      value: /etc/glpi
+    - key: GLPI_VAR_DIR
+      value: /var/lib/glpi/files
+    - key: GLPI_MARKETPLACE_DIR
+      value: /var/lib/glpi/plugins
+    - key: GLPI_LOG_DIR
+      value: /var/log/glpi
+  # Stable, version-independent OCI labels. The IMAGE bundles GLPI, which is
+  # GPL-3.0-or-later — so that is the image's declared license (this repo's
+  # own glue code is MIT, but the shipped artifact is GLPI).
+  labels:
+    - key: org.opencontainers.image.title
+      value: glpi-php-fpm
+    - key: org.opencontainers.image.vendor
+      value: Netresearch DTT GmbH
+    - key: org.opencontainers.image.licenses
+      value: GPL-3.0-or-later
+    - key: org.opencontainers.image.source
+      value: https://github.com/netresearch/glpi-docker-compose-stack

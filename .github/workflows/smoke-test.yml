@@ -6,15 +6,13 @@
 # Splits into:
 #   - image-surface     → delegates buildx --load amd64 +
 #                         container-structure-test to the netresearch/.github
-#                         reusable smoke-test-container.yml. Pinned to the
-#                         feature branch until PR netresearch/.github#141
-#                         merges; flip to @main then.
+#                         reusable smoke-test-container.yml (@main).
 #   - compose-up        → stays inline. Boots the full compose stack with
 #                         placeholder-substituted .env and probes / for
 #                         HTTP 200/302 — glpi-specific bootstrap and
 #                         known HTTP route.
 #   - init-idempotency  → stays inline. Verifies bin/init.sh is idempotent —
-#                         glpi-specific contract (APP_KEY / random PW
+#                         glpi-specific contract (random DB-password
 #                         generation must not re-roll on second run).
 #   - upstream-tests    → stays inline. Builds the `tester` Dockerfile stage
 #                         which runs the upstream GLPI phpunit suite —
@@ -80,17 +78,15 @@ jobs:
             ghcr.io/${{ github.repository_owner }}/glpi-php-fpm:latest
           cache-from: type=gha,scope=smoke-test
           cache-to: type=gha,scope=smoke-test,mode=max
-          # Authenticated github.com access during composer require. Same
-          # security model as .github/workflows/build.yml — withheld from
-          # fork PRs to prevent token exfiltration via Dockerfile edits.
-          secrets: |
-            GH_TOKEN=${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && secrets.GITHUB_TOKEN || '' }}
+          # No build secret: the GLPI image is built FROM the bundled release
+          # tarball (vendor/ pre-installed) — there is no composer step that
+          # needs authenticated github.com access (cf. build.yml / Dockerfile).
       - name: Bootstrap .env
         run: |
           cp .env.example .env
+          # GLPI has no APP_KEY; just seed the DB passwords compose needs.
           sed -i \
-            -e 's|^APP_KEY=$|APP_KEY=base64:Q0lfUExBQ0VIT0xERVJfS0VZX0ZPUl9DSV9PTkxZX1VTRQ==|' \
-            -e 's|^DB_PASSWORD=$|DB_PASSWORD=ci-pw-not-secret|' \
+            -e 's|^GLPI_DB_PASSWORD=$|GLPI_DB_PASSWORD=ci-pw-not-secret|' \
             -e 's|^DB_ROOT_PASSWORD=$|DB_ROOT_PASSWORD=ci-rootpw-not-secret|' \
             .env
           chmod 0600 .env
@@ -100,20 +96,25 @@ jobs:
         # it. The other services (mariadb, valkey, nginx, ofelia, phpbu) are
         # pulled normally — `--pull missing` is the default.
         run: docker compose up -d --wait --wait-timeout 300
-      - name: Wait for HTTP 200/302 on /
+      - name: Wait for the GLPI login page (HTTP 200 + "Authentication - GLPI")
         run: |
-          for i in $(seq 1 30); do
-            code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/ || true)
-            case "$code" in
-              200|302)
-                echo "got HTTP $code — pass"
-                exit 0
-                ;;
-            esac
-            echo "[$i] HTTP $code — retrying in 5 s"
+          # Resolve the published host port from .env (.env.example pins 8080).
+          port="$(grep -E '^GLPI_HTTP_PORT=' .env | cut -d= -f2)"
+          port="${port:-8080}"
+          body="$(mktemp)"
+          for i in $(seq 1 40); do
+            # Follow `/` → login redirect; capture body + final status code.
+            code=$(curl -sS -L -o "$body" -w '%{http_code}' "http://localhost:${port}/" || true)
+            # A bare 200 is not proof on its own (nginx could be serving an
+            # error/placeholder page) — assert GLPI's own login-page <title>.
+            if [ "$code" = "200" ] && grep -q 'Authentication - GLPI' "$body"; then
+              echo "GLPI login page served (HTTP $code, title 'Authentication - GLPI') — pass"
+              exit 0
+            fi
+            echo "[$i] HTTP ${code:-000} — no GLPI login marker yet; retrying in 5 s"
             sleep 5
           done
-          echo "stack didn't return 200/302 in 150 s"
+          echo "GLPI never served its login page (HTTP 200 + 'Authentication - GLPI') in time"
           docker compose logs --tail=200
           exit 1
       - name: Tear down (cleanup)
@@ -127,30 +128,18 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-      - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
-      - name: Build :latest locally so init.sh can generate APP_KEY
-        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
-        with:
-          context: .
-          target: runtime
-          platforms: linux/amd64
-          load: true
-          tags: |
-            ghcr.io/${{ github.repository_owner }}/glpi-php-fpm:latest
-          cache-from: type=gha,scope=smoke-test
-          # Authenticated github.com access during composer require. Same
-          # security model as build.yml — withheld from fork PRs.
-          secrets: |
-            GH_TOKEN=${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && secrets.GITHUB_TOKEN || '' }}
+      # No image build needed: bin/init.sh only writes .env (random DB
+      # passwords via openssl). Unlike a Laravel APP_KEY, GLPI's encryption
+      # key is generated by the app on first boot — not by init.sh.
       - name: First run
         run: ./bin/init.sh
       - name: Snapshot .env
         run: cp .env .env.firstrun
-      - name: Second run (must not change APP_KEY or passwords)
+      - name: Second run (must not re-roll the generated DB passwords)
         run: |
           ./bin/init.sh
           if ! diff -u .env.firstrun .env; then
-            echo "init.sh is NOT idempotent — APP_KEY or random PWs were re-rolled"
+            echo "init.sh is NOT idempotent — random DB passwords were re-rolled"
             exit 1
           fi
 

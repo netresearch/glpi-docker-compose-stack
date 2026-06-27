@@ -10,35 +10,25 @@
     {
       "customType": "regex",
       "managerFilePatterns": ["/^\\.glpi-version$/"],
-      "matchStrings": ["^(?<currentValue>v\\d+\\.\\d+\\.\\d+)\\s*$"],
-      "depNameTemplate": "grokability/glpi",
+      "matchStrings": ["^(?<currentValue>\\d+\\.\\d+\\.\\d+)\\s*$"],
+      "depNameTemplate": "glpi-project/glpi",
       "datasourceTemplate": "github-releases",
-      "extractVersionTemplate": "^(?<version>v\\d+\\.\\d+\\.\\d+)$"
+      "extractVersionTemplate": "^(?<version>\\d+\\.\\d+\\.\\d+)$"
     },
     {
       "customType": "regex",
       "managerFilePatterns": ["/^Dockerfile$/"],
       "matchStrings": [
-        "ARG GLPI_VERSION=(?<currentValue>v\\d+\\.\\d+\\.\\d+)"
+        "ARG GLPI_VERSION=(?<currentValue>\\d+\\.\\d+\\.\\d+)"
       ],
-      "depNameTemplate": "grokability/glpi",
+      "depNameTemplate": "glpi-project/glpi",
       "datasourceTemplate": "github-releases",
-      "extractVersionTemplate": "^(?<version>v\\d+\\.\\d+\\.\\d+)$"
-    },
-    {
-      "customType": "regex",
-      "managerFilePatterns": ["/^Dockerfile$/"],
-      "matchStrings": [
-        "ARG SUPERCRONIC_VERSION=(?<currentValue>v\\d+\\.\\d+\\.\\d+)"
-      ],
-      "depNameTemplate": "aptible/supercronic",
-      "datasourceTemplate": "github-releases",
-      "extractVersionTemplate": "^(?<version>v\\d+\\.\\d+\\.\\d+)$"
+      "extractVersionTemplate": "^(?<version>\\d+\\.\\d+\\.\\d+)$"
     }
   ],
   "packageRules": [
     {
-      "matchDepNames": ["grokability/glpi"],
+      "matchDepNames": ["glpi-project/glpi"],
       "commitMessageTopic": "GLPI",
       "labels": ["glpi-bump"],
       "automerge": false

@@ -39,12 +39,12 @@ body:
       label: Image tag / variant
       description: Which image variant of `ghcr.io/netresearch/glpi-php-fpm` (or the local build) are you running?
       options:
-        - "latest (rolling stable)"
-        - "rolling"
-        - "8.5.0 (current pin in .glpi-version)"
-        - "master (upstream)"
-        - "develop (upstream)"
-        - "local build via `docker buildx bake`"
+        - "latest (floating, rebuilt daily)"
+        - "11 (floating major)"
+        - "11.0 (floating major.minor)"
+        - "11.0.8 (exact version — current pin in .glpi-version)"
+        - "11.0.8-YYYYMMDD (immutable date-stamped)"
+        - "local build (`make build`)"
         - "other (please describe in Additional Context)"
     validations:
       required: true
@@ -92,7 +92,7 @@ body:
       placeholder: |
         1. `cp .env.example .env`
         2. `docker compose up -d`
-        3. Wait ~30s, then visit http://localhost:8000
+        3. Wait ~30s, then visit http://localhost:8080
         4. See 502 Bad Gateway
     validations:
       required: true
@@ -103,7 +103,7 @@ body:
       label: Actual vs expected behavior
       description: What did you see, and what did you expect?
       placeholder: |
-        **Expected:** GLPI installer screen at http://localhost:8000
+        **Expected:** GLPI installer screen at http://localhost:8080
         **Actual:** nginx 502; `app` container in restart loop.
     validations:
       required: true

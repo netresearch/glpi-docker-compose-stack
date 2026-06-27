@@ -10,8 +10,8 @@
 # `-f compose.yml -f examples/compose.X.yml` chaining.
 #
 # Usage:
-#   compose-file.sh add    examples/compose.bugsink.yml [more.yml ...]
-#   compose-file.sh remove examples/compose.bugsink.yml [more.yml ...]
+#   compose-file.sh add    examples/compose.traefik.yml [more.yml ...]
+#   compose-file.sh remove examples/compose.traefik.yml [more.yml ...]
 #   compose-file.sh list
 #
 # The base `compose.yml` is always implied — if COMPOSE_FILE is unset or
@@ -58,11 +58,13 @@ case "$action" in
   add)
     [[ $# -gt 0 ]] || { echo "compose-file add: at least one PATH required" >&2; exit 1; }
     for p in "$@"; do
-      # Only allow examples/compose.*.yml — anything else is either a typo
-      # or someone wiring an untrusted compose file into the stack.
+      # Allow-list the overlays this stack actually ships — anything else is
+      # either a typo or someone wiring an untrusted compose file into the
+      # stack. GLPI has no built-in error tracking, so (unlike the Snipe-IT
+      # sibling) there is deliberately no bugsink/sentry overlay here.
       case "$p" in
-        examples/compose.*.yml) ;;
-        *) echo "compose-file: only examples/compose.*.yml paths are allowed (got: $p)" >&2; exit 1 ;;
+        examples/compose.traefik.yml|examples/compose.caddy.yml|examples/compose.observability.yml) ;;
+        *) echo "compose-file: unknown overlay (allowed: traefik, caddy, observability): $p" >&2; exit 1 ;;
       esac
       [[ -f "$p" ]] || { echo "compose-file: $p not found" >&2; exit 1; }
       # Use boundaries to avoid partial-string matches (e.g. "a.yml"

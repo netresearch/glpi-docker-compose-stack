@@ -10,7 +10,7 @@ contact_links:
     url: https://github.com/netresearch/.github/blob/main/SECURITY.md
     about: Organization-wide security disclosure process (inherited by this repo).
   - name: GLPI upstream issues
-    url: https://github.com/grokability/glpi/issues
+    url: https://github.com/glpi-project/glpi/issues
     about: Bugs in the GLPI application itself (not the Docker stack) belong upstream.
   - name: GLPI documentation
     url: https://glpi.readme.io/

@@ -1,334 +1,206 @@
 <!-- SPDX-License-Identifier: CC-BY-SA-4.0 -->
 <!-- Copyright (c) 2026 Netresearch DTT GmbH -->
 
-# GLPI Docker Compose Stack
+# glpi-docker-compose-stack
 
-> [!WARNING]
-> **This project is no longer maintained.**
->
-> Netresearch has moved away from GLPI to [GLPI](https://github.com/glpi-project/glpi) for asset management. As a result, this repository is **archived** and will receive no further updates, security patches, or support.
->
-> The code remains available for reference and you are welcome to fork it, but use it at your own risk.
+An opinionated, production-grade Docker Compose stack for **[GLPI](https://glpi-project.org) 11**, built around a hardened, single-purpose **php-fpm image** (published to `ghcr.io/netresearch/glpi-php-fpm`) with nginx, MariaDB, Valkey, a cron scheduler and nightly backups — wired together with the security and supply-chain rigor you'd want for an IT asset-management system that holds your whole estate.
 
-[![Build](https://github.com/netresearch/glpi-docker-compose-stack/actions/workflows/build.yml/badge.svg)](https://github.com/netresearch/glpi-docker-compose-stack/actions/workflows/build.yml)
-[![Lint](https://github.com/netresearch/glpi-docker-compose-stack/actions/workflows/lint.yml/badge.svg)](https://github.com/netresearch/glpi-docker-compose-stack/actions/workflows/lint.yml)
-[![Code: MIT](https://img.shields.io/badge/code-MIT-blue.svg)](LICENSE-MIT)
-[![Content: CC-BY-SA-4.0](https://img.shields.io/badge/content-CC--BY--SA--4.0-green.svg)](LICENSE-CC-BY-SA-4.0)
-[![Image: AGPL-3.0](https://img.shields.io/badge/image-AGPL--3.0-orange.svg)](https://github.com/grokability/glpi/blob/master/LICENSE)
+Sibling of [`netresearch/snipe-it-docker-compose-stack`](https://github.com/netresearch/snipe-it-docker-compose-stack) and [`netresearch/phpbu-docker`](https://github.com/netresearch/phpbu-docker); same house style, GLPI internals.
 
-Opinionated, hardened, **daily-built** self-hosted [GLPI](https://glpiapp.com/) asset-management deployment — a Docker Compose stack with our own slim **PHP 8.5 / Alpine** php-fpm image, an always-on Laravel scheduler + queue worker, scheduled `phpbu` backups, and dev overrides with mailpit and adminer for friction-free local development.
+> **Not affiliated with the GLPI project / Teclib'.** This packages upstream GLPI (GPL-3.0-or-later); the stack tooling here is MIT, the docs CC-BY-SA-4.0.
 
-Made by [Netresearch DTT GmbH](https://www.netresearch.de/) on the back of a real GLPI inventory evaluation. Battle-scarred defaults, not a barebones starter.
+---
 
-## Try it in 60 seconds
+## Why this instead of the official image?
 
-```bash
-git clone https://github.com/netresearch/glpi-docker-compose-stack.git
-cd glpi-docker-compose-stack
-make init   # bootstraps .env (APP_KEY + random DB passwords, idempotent)
-make up     # docker compose up -d
-# First boot pulls ~700 MB of images (~5 min on a typical link) and runs
-# `php artisan migrate --force` (~60-90 s). When `make health` is green:
-# visit http://localhost:8000
-```
+The official `glpi/glpi` image is Apache + mod_php in a single container with a built-in supervisor. This stack instead:
 
-`make help` lists every target (artisan, backup, upgrade, health, …). For a full walkthrough see [Quick start](#quick-start) below.
+- **Decouples** PHP (php-fpm) from the web server (nginx) so each scales and updates independently, and php-fpm listens on a **unix socket only** (no FastCGI-over-TCP bypass surface).
+- Builds GLPI from the **bundled release tarball** into a minimal, **multi-stage, non-root** image with the code layer **read-only** and only the state dirs writable.
+- Serves from GLPI's **`public/` docroot** (mandatory in GLPI 11) with a strict **CSP** and security-header set.
+- Ships **MariaDB with binlog** (point-in-time recovery), **Valkey** as GLPI's cache backend, **ofelia** running GLPI's `front/cron.php`, and **phpbu** for nightly DB + files + **encryption-key** backups.
+- Multi-arch images (amd64/arm64) with **SLSA provenance, an in-image SBOM, and keyless cosign signatures**, rebuilt daily for base-image CVEs.
 
-<details>
-<summary><strong>Table of contents</strong></summary>
-
-- [What's in the stack](#whats-in-the-stack)
-- [What's in our image](#whats-in-our-image)
-- [Why does this exist?](#why-does-this-exist)
-- [Quick start](#quick-start)
-- [Common operations](#common-operations)
-- [Dev mode](#dev-mode)
-- [TLS / reverse proxy](#tls--reverse-proxy)
-- [Image tags](#image-tags)
-- [Configuration](#configuration)
-- [Error tracking (Sentry / Bugsink)](#error-tracking-sentry--bugsink)
-- [Security posture](#security-posture)
-- [Backups](#backups)
-- [Upgrading](#upgrading)
-- [Operating the stack](#operating-the-stack)
-- [Migrating from the upstream single-container image](#migrating-from-the-upstream-single-container-image)
-- [Related projects](#related-projects)
-- [Contributing](#contributing)
-- [License](#license)
-
-</details>
-
-## What's in the stack
+## Architecture
 
 ```
-                          ┌────────────────────────────────────────────────┐
-                          │  internal compose network (`glpi`)          │
-                          │                                                │
-   client ──HTTP──► web ──┼──► app  ── ghcr.io/netresearch/glpi-php-fpm   ◄── built daily
-       (8000)    nginx    │     │    (php-fpm, handles web requests)
-                 :alpine  │     │
-                          │     ├──► worker ── same image, runs
-                          │     │              `php artisan queue:work`
-                          │     │
-                          │     ├──► db      ── mariadb:11 (binlog enabled)
-                          │     │
-                          │     └──► valkey  ── valkey/valkey:9-alpine
-                          │                                                │
-                          │     scheduler ── ghcr.io/netresearch/ofelia    │
-                          │       │ (runs `artisan schedule:run` per       │
-                          │       │  minute and triggers nightly phpbu)    │
-                          │       │                                        │
-                          │       └─► backup ── ghcr.io/netresearch/phpbu-docker
-                          │                                                │
-                          │     one-shot init: app-assets populates the
-                          │     shared `app-public` volume so nginx can
-                          │     serve GLPI's public/ files statically.
-                          └────────────────────────────────────────────────┘
-
-   Only `web` is reachable from the host (port 8000 by default). Every other
-   service (db, valkey, app, worker, scheduler, backup) has no host-published
-   port in the default stack — they talk to each other on the internal network.
+                         ┌──────────── host :8080 (loopback) / reverse proxy
+                         ▼
+                    ┌─────────┐   unix socket    ┌──────────────────┐
+   browser ───────▶│   web   │◀────────────────▶│       app        │
+                   │ nginx   │  /run/php-fpm/    │  glpi-php-fpm    │
+                   │ public/ │   glpi.sock       │  (GLPI 11.0.8)   │
+                   └─────────┘                   └───────┬──────────┘
+                        ▲ static assets                  │ mysqli      ┌──────────┐
+                        │ (glpi-public volume)           ├────────────▶│   db     │
+                   ┌──────────┐                          │             │ mariadb  │
+                   │app-assets│ one-shot public/ sync    │ cache       │ (binlog) │
+                   └──────────┘                          ├────────────▶└──────────┘
+                                                         │             ┌──────────┐
+   ┌───────────┐  docker exec  front/cron.php (2 min)    └────────────▶│  valkey  │
+   │ scheduler │──────────────▶ app                                    │  cache   │
+   │  ofelia   │──────────────▶ backup (phpbu, nightly 03:00)          └──────────┘
+   └───────────┘
 ```
 
-Seven long-running services plus a one-shot init:
-
-| Service | Image | Purpose |
+| Service | Image | Role |
 |---|---|---|
-| **db** | `mariadb:11` | Primary store, binlog enabled for PITR |
-| **valkey** | `valkey/valkey:9-alpine` | Cache + sessions + queue backend (Redis-compatible) |
-| **app** | `ghcr.io/netresearch/glpi-php-fpm` | **Our** php-fpm image, GLPI app code |
-| **web** | `nginx:alpine` | Static asset serving + fastcgi → `app` (unix socket) |
-| **worker** | (same as `app`) | `php artisan queue:work` daemon — drains async jobs from valkey (emails, EOL reminders, etc.) |
-| **scheduler** | `ghcr.io/netresearch/ofelia` | Label-driven cron for `artisan schedule:run` (per minute) **and** the nightly `phpbu` backup |
-| **backup** | `ghcr.io/netresearch/phpbu-docker` | Nightly DB dump + uploads/storage tarball with retention policy |
-| **app-assets** | (same as `app`) | One-shot init: syncs `public/` into the shared `app-public` volume |
+| `db` | `mariadb:11` | GLPI database, `ROW` binlog + durable fsync (PITR-ready) |
+| `valkey` | `valkey:9-alpine` | GLPI core cache (RESP/redis-compatible), AOF persistence |
+| `app-assets` | this image | one-shot: syncs `public/` into a volume nginx serves |
+| `app` | `ghcr.io/netresearch/glpi-php-fpm` | GLPI on php-fpm, socket-only, non-root |
+| `web` | `nginx:alpine` | serves `public/` + FastCGI to `app`, CSP/security headers |
+| `scheduler` | `ghcr.io/netresearch/ofelia` | runs GLPI `front/cron.php` (2 min) + phpbu (nightly) |
+| `backup` | `ghcr.io/netresearch/phpbu-docker` | nightly DB dump + `files/` + **config (crypt key)** archive |
 
-[`compose.yml`](compose.yml) is the canonical reference — heavily commented with sizing, security, and resource-limit rationale.
-
-## What's in our image
-
-The php-fpm image (`ghcr.io/netresearch/glpi-php-fpm`) is intentionally narrow — just PHP + GLPI app code:
-
-| | |
-|---|---|
-| **Base** | `php:8.5-fpm-alpine` |
-| **PHP extensions** | bcmath, exif, gd, intl, ldap, mbstring, opcache, pdo_mysql, redis, xml, zip |
-| **Runtime user** | `www-data` (non-root) |
-| **Init** | `tini` as PID 1 → entrypoint → php-fpm |
-| **Healthcheck** | `cgi-fcgi` ping on `/run/php-fpm/glpi.sock` |
-| **Multi-arch** | linux/amd64, linux/arm64 |
-| **Supply chain** | SLSA build provenance (in-toto via `attest-build-provenance`) + SBOM + keyless cosign signature (OIDC, Rekor-logged) on every push / scheduled build |
-| **License** | AGPL-3.0-or-later (matches GLPI upstream) |
-
-## Why does this exist?
-
-The official `snipe/glpi` image is fine but conservative:
-- ships PHP 8.3 (Ubuntu) or 8.4 (Alpine) — not the upstream-recommended 8.5
-- the Alpine variant has no built-in scheduler, so Laravel's scheduled tasks (audit reminders, expected-checkin alerts, license expiry warnings) silently don't run
-- new versions ship every 3-6 months — base-OS CVEs accrue between releases
-
-This stack fixes all three:
-1. **PHP 8.5** (upstream-supported via `composer.json` `^8.2`)
-2. **Scheduler + queue worker run by default** via [ofelia](https://github.com/netresearch/ofelia) (Netresearch's fork) and a dedicated `worker` service — no in-container cron, no silently-dropped emails
-3. **Daily rebuild** picks up Alpine + PHP + Composer-dep patches without waiting for an upstream GLPI release
-
-Already running upstream `snipe/glpi`? See [Migrating from the upstream single-container image](#migrating-from-the-upstream-single-container-image).
-
-## Quick start
+## Quickstart
 
 ```bash
-git clone https://github.com/netresearch/glpi-docker-compose-stack.git
+git clone https://github.com/netresearch/glpi-docker-compose-stack
 cd glpi-docker-compose-stack
-make init                              # bootstraps .env (APP_KEY + random DB passwords, idempotent)
-make up                                # docker compose up -d
-make logs-app                          # Ctrl-C stops the tail (does NOT stop the stack)
-# First boot pulls ~700 MB of images (~5 min on a typical link)
-# and runs `php artisan migrate --force` (~60-90 s) — wait for the
-# "ready — exec into CMD" line before opening the URL.
-# Then open:  http://localhost:8000
+
+make init          # writes .env with random DB passwords (idempotent)
+make up            # start the stack; first boot auto-installs GLPI
+
+# wait until healthy, then:
+open http://localhost:8080      # login: glpi / glpi  ← CHANGE IMMEDIATELY
 ```
 
-For public deployments, set `APP_URL` in `.env` (no trailing slash) AFTER `make init` and run `make down && make up` to re-read env across all services (`make restart` only restarts `app` + `web`, so `worker` would keep emitting stale URLs in queued emails). The reverse-proxy overlay at [`examples/compose.traefik.yml`](examples/compose.traefik.yml) handles TLS termination.
+First boot runs `bin/console database:install`, generating the schema **and** the
+encryption key (`glpicrypt.key`, kept in the `glpi-config` volume). Every later
+boot runs `database:update` to migrate the schema to the image's GLPI version.
 
-## Common operations
-
-| Goal | Command |
-|---|---|
-| Start / stop the stack | `make up` / `make down` |
-| Restart `app` + `web` only (no env re-read) | `make restart` |
-| Tail logs | `make logs-app` (one service) or `make logs` (all) |
-| Aggregated health (wire into monitoring) | `make health` |
-| One-shot artisan command | `make artisan CMD="route:list"` |
-| Interactive Laravel REPL | `make tinker` |
-| Shell inside `app` | `make shell` |
-| On-demand backup | `make backup` (ofelia auto-runs nightly at 03:00) |
-| Pull + recreate + tail | `make upgrade` |
-| Show enabled overlays | `make overlays` |
-| Enable an overlay | `make enable-traefik` / `make enable-caddy` / `make enable-observability` / `make enable-bugsink` |
-| Disable an overlay | `make disable-traefik` / `make disable-caddy` / `make disable-observability` / `make disable-bugsink` |
-| Wire external Sentry/Bugsink | `make enable-sentry DSN=https://...` / `make disable-sentry` |
-
-`make help` is the canonical, always-current list.
-
-## Dev mode
-
-```bash
-cp compose.override.yml.example compose.override.yml
-docker compose up -d
-```
-
-Brings up the same stack plus:
-- **mailpit** at <http://localhost:8025> — SMTP sink + web UI to catch outgoing notifications
-- **adminer** at <http://localhost:8081> — DB browser
-- Exposed db (3306) + valkey (6379) host ports for external clients
-- `APP_DEBUG=true`, `APP_ENV=local`
-
-## TLS / reverse proxy
-
-The default `web` service binds plain HTTP on `${SNIPEIT_HTTP_PORT:-8000}`. Front it with your TLS terminator of choice. Two overlays ship in [`examples/`](examples/):
-
-```bash
-# Traefik (requires an existing traefik network)
-docker compose -f compose.yml -f examples/compose.traefik.yml up -d
-
-# Caddy
-docker compose -f compose.yml -f examples/compose.caddy.yml up -d
-```
-
-For host-side nginx / HAProxy / your existing terminator, point it at `127.0.0.1:${SNIPEIT_HTTP_PORT}` and set `APP_URL=https://…` in `.env`. A Prometheus-scraping overlay also ships at [`examples/compose.observability.yml`](examples/compose.observability.yml).
-
-## Image tags
-
-Built daily, multi-arch (`linux/amd64` + `linux/arm64`), in two variants. Pinned (default) honours GLPI's `composer.lock`; rolling (suffix `-rolling`) re-resolves Composer ranges so CVE fixes in transitive deps land faster.
-
-| Tag | Variant | Resolves to |
-|---|---|---|
-| `latest` | pinned | Latest stable GLPI release (tracks `.glpi-version`) |
-| `8.5.0` | pinned | `refs/tags/v8.5.0` |
-| `8.5.0-YYYYMMDD` | pinned | Reproducible dated build — audit-friendly |
-| `8.5` / `8` | pinned | Auto-rolls on patch / minor bump |
-| `master` / `develop` / `nightly` | pinned | Upstream branch HEAD |
-| `master-rolling` / `develop-rolling` / `nightly-rolling` | rolling | Upstream branch HEAD with `composer.lock` deleted |
-| `<tag>-rolling` | rolling | Same source ref as pinned, `composer.lock` deleted before `install` |
-| `sha-pinned-<sha>` / `sha-rolling-<sha>` | both | Per-stack-commit build |
-
-**Pick pinned for production** — reproducible, manifest-equivalent rebuilds (modulo base-image patches). **Pick rolling** if you'd rather catch transitive-dep CVEs early than match upstream's tested dependency graph.
-
-**Rolling-variant caveat:** rolling builds can fail (and skip publishing) when upstream's `composer.json` references a major version of a dependency entirely covered by a Composer audit advisory — Composer refuses to install vulnerable packages by default. When this happens, the **pinned** image still ships because its lockfile pins the specific safe version upstream chose; the rolling tag lags until GLPI bumps its constraint. Watch the failed rolling job in CI to see which advisory tripped it.
-
-Each image (both variants) ships a manifest at `/var/lib/glpi/deps.txt` — `docker exec <container> cat /var/lib/glpi/deps.txt` to see exactly which versions are installed.
+GLPI ships several default accounts (`glpi`, `tech`, `normal`, `post-only`) all
+with the password matching the username — **change or disable every one** before
+exposing the instance.
 
 ## Configuration
 
-[`.env.example`](.env.example) is the complete reference. Required vars:
+All configuration is in `.env` (copy from `.env.example`; `make init` fills the
+passwords). Key variables:
 
-| Variable | Description |
-|---|---|
-| `APP_KEY` | Laravel application key — generate once, never rotate |
-| `APP_URL` | Public URL, no trailing slash |
-| `DB_PASSWORD` | Application DB user password |
-| `DB_ROOT_PASSWORD` | MariaDB root (only used at init) |
-
-Operational toggles:
-
-| Variable | Default | Description |
+| Variable | Default | Purpose |
 |---|---|---|
-| `GLPI_IMAGE_TAG` | `latest` | Pin to a specific image build |
-| `CACHE_DRIVER` / `SESSION_DRIVER` / `QUEUE_CONNECTION` | `redis` | Laravel driver names (RESP protocol). Flip to `file`/`file`/`sync` if you remove the valkey service |
-| `SKIP_MIGRATIONS` | `false` | Skip `php artisan migrate --force` at container start |
-| `TZ` | `UTC` | IANA timezone — sets the OS clock inside containers (log/cron timestamps) |
-| `APP_TIMEZONE` | inherits `TZ` | What Laravel reads for date/time display; override only if it must diverge from `TZ` |
-| `SENTRY_LARAVEL_DSN` | _(empty)_ | Error tracking DSN — empty disables; see [Error tracking](#error-tracking-sentry--bugsink) |
+| `GLPI_IMAGE_TAG` | `latest` | image tag to run (pin to a version in prod) |
+| `GLPI_DB_NAME` / `GLPI_DB_USER` / `GLPI_DB_PASSWORD` | `glpi` / `glpi` / — | database |
+| `DB_ROOT_PASSWORD` | — | MariaDB root (init only) |
+| `GLPI_CACHE_DSN` | `redis://valkey:6379` | GLPI cache backend |
+| `GLPI_ENVIRONMENT_TYPE` | `production` | `production` hides debug surfaces |
+| `GLPI_AUTOINSTALL` | `true` | install on first boot / upgrade thereafter |
+| `SKIP_DB_UPDATE` | `false` | skip on-boot `database:update` (multi-replica) |
+| `GLPI_HTTP_PORT` | `8080` | loopback host port for `web` |
+| `GLPI_HOST` | `glpi.example.com` | public hostname (reverse-proxy overlays) |
+| `TZ` | `Europe/Berlin` | container clock |
 
-Docker secrets supported via `*_FILE` env vars (e.g. `DB_PASSWORD_FILE=/run/secrets/db_password`).
+The image relocates GLPI's mutable state off the read-only code root via
+`GLPI_CONFIG_DIR=/etc/glpi`, `GLPI_VAR_DIR=/var/lib/glpi/files`,
+`GLPI_MARKETPLACE_DIR=/var/lib/glpi/plugins`, `GLPI_LOG_DIR=/var/log/glpi` —
+each on its own named volume.
 
-## Error tracking (Sentry / Bugsink)
+> **Uploads:** php and nginx allow **64 MB** request bodies by default (GLPI
+> stores documents as attachments). Raise `upload_max_filesize`/`post_max_size`
+> (php) and `client_max_body_size` (nginx) together for larger files. GLPI also
+> only accepts uploads whose extension is in its *Document types* allow-list
+> (Setup → Dropdowns → Document types) — add any custom types you need.
 
-The image ships `sentry/sentry-laravel` pre-installed. Set `SENTRY_LARAVEL_DSN` to your project DSN (`http(s)://<key>@<host>/<project-id>`) to start collecting errors; an empty DSN keeps the SDK silent (no network calls). [Bugsink](https://www.bugsink.com/) is recommended for self-hosting — it speaks the Sentry wire protocol and avoids the SaaS data-egress concern for an internal asset-management tool.
+## Persistent data
 
-| Goal | Command |
-|---|---|
-| Point at an **external** Sentry/Bugsink instance | `make enable-sentry DSN=https://<key>@<host>/<project-id>` |
-| Run a **self-hosted Bugsink** in-stack with auto-wired DSN | `make enable-bugsink` |
-| Stop external reporting | `make disable-sentry` |
-| Remove the in-stack Bugsink overlay | `make disable-bugsink` |
-| Show what's currently enabled | `make overlays` |
+| Volume | Mount | Contents | Back up? |
+|---|---|---|---|
+| `glpi-db-data` | db `/var/lib/mysql` | the database | yes (phpbu dumps it) |
+| `glpi-config` | app `/etc/glpi` | `config_db.php` + **`glpicrypt.key`** | **yes — critical** |
+| `glpi-var` | app `/var/lib/glpi/files` | uploads, cache, sessions, pictures | yes |
+| `glpi-plugins` | app `/var/lib/glpi/plugins` | marketplace plugins | optional |
+| `glpi-logs` | app `/var/log/glpi` | application logs | no |
 
-Both `enable-*` targets mutate `.env`; after enabling, `make up` brings the configured stack up — no manual `-f` chaining. The Bugsink overlay adds a SQLite-backed `bugsink` service plus a one-shot `bugsink-init` container that seeds a project and writes its DSN into a tmpfs-backed shared volume; `app` and `worker` pick it up via `SENTRY_LARAVEL_DSN_FILE`. Re-runs are idempotent.
+> ⚠️ **Never delete `glpi-config`.** `glpicrypt.key` is the AES key for every
+> encrypted DB field (stored credentials, plugin secrets). Lose it and that data
+> is unrecoverable — which is why the nightly backup archives the config dir and
+> the entrypoint refuses to regenerate the key.
 
-When fronting Bugsink with TLS, set `BUGSINK_PUBLIC_URL=https://bugsink.example.com` and `BUGSINK_BEHIND_HTTPS_PROXY=true` — see the comments in [`examples/compose.bugsink.yml`](examples/compose.bugsink.yml) for the `X-Forwarded-*` trust caveat (Traefik strips client-supplied headers by default; Caddy needs `trusted_proxies` configured). `BUGSINK_ADMIN_PASSWORD` is a bootstrap-only value — rotate it via the Bugsink UI on first login, then clear it from `.env`.
+## Operations
+
+```bash
+make logs                 # tail all services
+make console -- glpi:cache:clear      # run any bin/console command
+make ps                   # status
+make down                 # stop (keep volumes)
+```
+
+- **Cron** — `ofelia` execs `php front/cron.php` in `app` every 2 minutes
+  (GLPI's automatic actions). A heartbeat job feeds the `app` healthcheck, so a
+  dead scheduler turns the container unhealthy. Set GLPI's *Automatic actions* to
+  **CLI** mode (Setup → General → Automatic actions) for deterministic scheduling.
+- **Upgrades** — bump `.glpi-version` (+ `GLPI_IMAGE_TAG`), `make up`; the
+  entrypoint runs a maintenance-wrapped `database:update`.
+- **Backups / restore** — see [`docs/runbook-restore.md`](docs/runbook-restore.md).
+- **Day-2 ops** — see [`docs/runbook-day2-ops.md`](docs/runbook-day2-ops.md).
+- **ofelia is host-wide:** with the docker socket mounted it runs the labelled
+  jobs of **every** stack on the host — run only one labelled stack per host, or
+  isolate the scheduler.
+
+## TLS / reverse proxy
+
+The `web` port is published on **loopback only**. Front it with one of the
+overlays:
+
+```bash
+make enable-traefik        # or: enable-caddy
+$EDITOR .env               # set GLPI_HOST
+make up
+```
+
+See `examples/compose.traefik.yml`, `examples/compose.caddy.yml`, and
+`examples/compose.observability.yml`.
+
+## The image
+
+Built from GLPI's bundled release tarball (`glpi-X.Y.Z.tgz`, vendor included) on
+`php:8.4-fpm-alpine`. PHP extensions: `bcmath bz2 exif gd intl ldap mbstring
+mysqli opcache redis sodium zip` plus the GLPI-required builtins. Runs as
+`www-data` (root-owned, read-only code), `tini` PID 1, `SIGQUIT` graceful stop,
+cgi-fcgi `/ping` healthcheck.
+
+```bash
+# Run a one-off console command against the published image:
+docker run --rm ghcr.io/netresearch/glpi-php-fpm:latest \
+  php /var/www/glpi/bin/console --version
+```
+
+Verify provenance and signatures:
+
+```bash
+gh attestation verify oci://ghcr.io/netresearch/glpi-php-fpm:11.0.8 \
+  --owner netresearch
+cosign verify ghcr.io/netresearch/glpi-php-fpm:11.0.8 \
+  --certificate-identity-regexp 'https://github.com/netresearch/glpi-docker-compose-stack/.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
 
 ## Security posture
 
-- **Non-root execution** — `www-data` runs php-fpm and queue:work; entrypoint drops privileges with `su-exec` after repairing volume permissions
-- **No new privileges** — `security_opt: no-new-privileges:true` on every long-running service (db/valkey/app/web/worker/scheduler/backup, plus the bugsink overlay)
-- **Capability drop** — `cap_drop: ALL` on `app`, `web`, and `worker` with minimal re-adds (see [`compose.yml`](compose.yml) for the per-service list); db/valkey/scheduler/backup keep default caps the upstream images expect
-- **Overlay parity** — opt-in overlays in [`examples/`](examples/) (Bugsink, Traefik, Caddy, observability) ship with the same `no-new-privileges` + `cap_drop: ALL` posture on every long-running service they add
-- **Read-only mounts** — nginx reads `app-public` and `app-storage` read-only
-- **tmpfs** — `/tmp`, `/var/cache/nginx`, `/var/run` are tmpfs on `web`; `bootstrap/cache` is tmpfs on `app` (prevents attacker-written PHP from persisting across restarts)
-- **Unix-socket-only php-fpm** — no TCP listener on 9000, so a sibling container on the glpi network can't bypass nginx and speak FastCGI directly to `app`
-- **Pinned upstream** — GLPI git-tag-pinned via [`.glpi-version`](.glpi-version); base PHP + Alpine versions tag-pinned in [`Dockerfile`](Dockerfile) (rebuilt daily so re-tagged registry content is picked up)
-- **Daily rebuild** — picks up base-image CVEs without waiting for upstream
-- **Supply chain** — SLSA build provenance attestations (in-toto via [`attest-build-provenance`](https://github.com/actions/attest-build-provenance)), SBOM (BuildKit `sbom=true`), and a keyless cosign signature on the image manifest (OIDC, Rekor-logged) — all attached on every push and scheduled build
-- **CVE scanning** — daily Trivy + osv-scanner runs (see [Actions → security](https://github.com/netresearch/glpi-docker-compose-stack/actions/workflows/security.yml)). Findings are informational, NOT CI gates — most flagged CVEs are in GLPI's upstream-pinned `composer.lock` (e.g. `phpseclib`, `onelogin/php-saml`) and need an upstream fix. Trivy SARIF uploads to GitHub code-scanning; subscribe via the repo Security tab for new-finding alerts.
+- Non-root, read-only code layer; php-fpm workers drop to `www-data`.
+- `cap_drop: ALL` + `no-new-privileges` + `tmpfs` on app/web; socket-only FastCGI.
+- nginx serves only `public/`; config, vendor and the files tree are unreachable.
+- Enforcing CSP + standard security headers (see `config/nginx/snippets/`).
+- MariaDB durable-by-default with binlog for PITR.
+- Multi-arch images with SLSA provenance, SBOM and keyless cosign signatures,
+  rebuilt daily for base-image CVEs.
 
-## Backups
+Report vulnerabilities per [`SECURITY.md`](SECURITY.md).
 
-`phpbu` runs nightly at **03:00** (ofelia-driven) and produces three artefact families in the `backups` volume:
-
-| Path | Contents | Retention |
-|---|---|---|
-| `db/glpi-db-*.sql.gz` | mariadb-dump (single-transaction) | rolling capacity (~5 GB) |
-| `uploads/glpi-uploads-*.tar.gz` | GLPI uploads (`app-data` volume) | 30 days |
-| `storage/glpi-storage-*.tar.gz` | Laravel storage (`app-storage` volume) | 30 days |
-
-On-demand backup: `make backup`. Off-host shipping: bind-mount the `backups` volume into a destination synced by your existing tool (restic, rclone, NAS-attached cron). Disaster-recovery procedure: [`docs/runbook-restore.md`](docs/runbook-restore.md).
-
-## Upgrading
+## Development & contributing
 
 ```bash
-make upgrade           # pulls latest images, recreates containers, follows logs
+make build        # build the image locally
+make lint         # hadolint + shellcheck + yamllint + actionlint
+make test         # container-structure-test + hardening-check + bats
 ```
 
-The `app` entrypoint runs `php artisan migrate --force` on every start. No DDL grant dance required — this stack's DB user is the app's own MariaDB account with full schema rights inside its database.
+See [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
-## Operating the stack
+## Licensing
 
-When something breaks, [`docs/runbook-day2-ops.md`](docs/runbook-day2-ops.md) catalogues the failure modes we know about — symptom → first check → recovery. Common ones:
-
-- **App returns 500** — `make logs-app` (Laravel logs to stdout as JSON via `LOG_CHANNEL=stderr` + `LOG_STDERR_FORMATTER`)
-- **Users randomly logged out** — Valkey LRU eviction; tune `--maxmemory` in `compose.yml` or switch to `SESSION_DRIVER=file`
-- **`make up` complains about missing `.env`** — run `make init` first; the Makefile guard prevents the empty-root-password footgun
-- **Backup-volume full** — `make backup-verify` flags it; tune retention in `config/phpbu/backup.json`
-
-`make health` shows the aggregated health state of all containers and fails loudly when one is unhealthy — wire it into your existing monitoring.
-
-## Migrating from the upstream single-container image
-
-If you're moving from `snipe/glpi:vX.Y.Z-alpine` (Apache + PHP-FPM + cron in one container), follow [`docs/migration-from-upstream-single-container.md`](docs/migration-from-upstream-single-container.md). It covers volume mapping, env-var translation, and the cutover sequence (the upstream `STORAGE_DIR` and `PRIVATE_UPLOADS_DIR` aren't a 1:1 match for this stack's `app-data` / `app-storage` split).
-
-## Related projects
-
-- [grokability/glpi](https://github.com/grokability/glpi) — upstream GLPI itself
-- [snipe/glpi](https://hub.docker.com/r/snipe/glpi) — official Docker image
-- [netresearch/ofelia](https://github.com/netresearch/ofelia) — the scheduler this stack uses
-- [netresearch/phpbu-docker](https://github.com/netresearch/phpbu-docker) — the backup engine this stack uses
-
-## Contributing
-
-PRs welcome. Standard community files (CONTRIBUTING / CODE_OF_CONDUCT / SECURITY) inherit from [Netresearch's org-level `.github` repo](https://github.com/netresearch/.github).
-
-Security issues: please report via the standard Netresearch security contact rather than as a public issue.
-
-## License
-
-This repository uses split licensing — the right tool for each part:
-
-| Path | License | Rationale |
-|---|---|---|
-| `Dockerfile`, `rootfs/`, `config/`, `compose*.yml`, `examples/`, `.github/`, `bin/`, `Makefile`, `tests/`, `renovate.json`, `.glpi-version` | [MIT](LICENSE-MIT) | Code and code-shaped configuration |
-| `README.md`, `CHANGELOG.md`, `docs/**` | [CC-BY-SA-4.0](LICENSE-CC-BY-SA-4.0) | Prose and documentation — share-alike keeps forks open |
-
-**The built image** (`ghcr.io/netresearch/glpi-php-fpm:*`) bundles AGPL-3.0 GLPI application code from [grokability/glpi](https://github.com/grokability/glpi). Redistribution of the image is bound by the upstream AGPL-3.0 terms in addition to MIT for our build glue.
-
-This split follows the [Netresearch skill-repo licensing pattern](https://github.com/netresearch?q=skill).
+- Stack tooling (Dockerfile, compose, scripts, CI): **MIT** — [`LICENSE-MIT`](LICENSE-MIT)
+- Documentation: **CC-BY-SA-4.0** — [`LICENSE-CC-BY-SA-4.0`](LICENSE-CC-BY-SA-4.0)
+- The packaged GLPI application: **GPL-3.0-or-later** (© the GLPI project / Teclib')

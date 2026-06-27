@@ -11,10 +11,12 @@
 #   │   ├── env-set.sh        ← copy from real repo
 #   │   └── compose-file.sh   ← copy from real repo
 #   ├── examples/
-#   │   ├── compose.bugsink.yml         (empty placeholder)
-#   │   ├── compose.caddy.yml           (empty placeholder)
-#   │   ├── compose.observability.yml   (empty placeholder)
-#   │   └── compose.traefik.yml         (empty placeholder)
+#   │   ├── compose.caddy.yml           (empty placeholder, accepted overlay)
+#   │   ├── compose.observability.yml   (empty placeholder, accepted overlay)
+#   │   ├── compose.traefik.yml         (empty placeholder, accepted overlay)
+#   │   └── compose.bugsink.yml         (empty placeholder, DROPPED overlay —
+#   │                                    present only to prove the allow-list
+#   │                                    rejects it even when the file exists)
 #   └── .env                  ← mode 0600, optional seed content
 #
 # Both helpers `cd "$(dirname "$0")/.."` to the repo root before
@@ -64,12 +66,14 @@ setup_fake_repo() {
   cp "$REAL_BIN/compose-file.sh" "$BATS_TEST_TMPDIR/bin/compose-file.sh"
   chmod +x "$BATS_TEST_TMPDIR/bin/"*.sh
 
-  # Touch the four overlay files compose-file.sh accepts. Empty content
-  # is fine — the script only stats them, never reads them.
-  : > "$BATS_TEST_TMPDIR/examples/compose.bugsink.yml"
+  # Touch the three overlay files compose-file.sh accepts, plus a bugsink
+  # file representing the deliberately-dropped overlay (so a test can prove
+  # it is rejected by the allow-list even though the file exists). Empty
+  # content is fine — the script only stats these, never reads them.
   : > "$BATS_TEST_TMPDIR/examples/compose.caddy.yml"
   : > "$BATS_TEST_TMPDIR/examples/compose.observability.yml"
   : > "$BATS_TEST_TMPDIR/examples/compose.traefik.yml"
+  : > "$BATS_TEST_TMPDIR/examples/compose.bugsink.yml"
 
   # Seed .env. umask 077 ensures the file is born at 0600 even before
   # the explicit chmod below — mirrors init.sh.

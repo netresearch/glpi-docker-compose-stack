@@ -1,0 +1,53 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Netresearch DTT GmbH
+#
+# Weekly GHCR retention for the glpi-php-fpm package.
+#
+# The daily build.yml pushes a fresh multi-arch image; each push leaves the
+# previous build's per-arch child manifests UNTAGGED behind the moving tags
+# (latest / 11 / 11.0 / dated). Left unchecked these untagged versions
+# accumulate forever. This job prunes them while keeping a safety margin, and
+# NEVER touches tagged versions (no released image is ever deleted here).
+
+name: Cleanup Old Packages
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Weekly, Sundays 03:00 UTC.
+    - cron: '0 3 * * 0'
+
+# Deny by default; the single job opts into packages:write only.
+permissions: {}
+
+env:
+  PACKAGE_NAME: glpi-php-fpm
+
+jobs:
+  cleanup:
+    name: prune untagged versions
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - name: Delete old untagged versions
+        uses: actions/delete-package-versions@e5bc658cc4c965c472efe991f8beea3981499c55 # v5.0.0
+        with:
+          package-name: ${{ env.PACKAGE_NAME }}
+          package-type: container
+          # Keep the 10 most recent untagged versions as a rollback margin.
+          min-versions-to-keep: 10
+          # Only ever delete untagged versions — released tags are immutable here.
+          delete-only-untagged-versions: true
+
+      - name: Summary
+        env:
+          PACKAGE_NAME: ${{ env.PACKAGE_NAME }}
+        run: |
+          {
+            echo "## Package Cleanup Summary"
+            echo ""
+            echo "- Package: \`${PACKAGE_NAME}\` (container)"
+            echo "- Kept minimum: 10 untagged versions"
+            echo "- Deleted only untagged: true (tagged releases untouched)"
+          } >> "$GITHUB_STEP_SUMMARY"

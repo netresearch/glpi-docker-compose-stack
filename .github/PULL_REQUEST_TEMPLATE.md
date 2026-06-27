@@ -35,7 +35,7 @@ Closes #
 - [ ] `make lint` passes locally
 - [ ] `make test-image` passes locally
 - [ ] `docker compose up -d` brings the stack up cleanly (`docker compose ps` all healthy)
-- [ ] Manual smoke-test against `http://localhost:8000` (or documented alt entrypoint)
+- [ ] Manual smoke-test against `http://localhost:8080` (or documented alt entrypoint)
 - [ ] For backup/restore changes: `make backup` and `make restore` exercised against a throwaway dataset
 
 ## Reviewer checklist

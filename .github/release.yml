@@ -1,0 +1,57 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Netresearch DTT GmbH
+#
+# Auto-generated release-notes configuration. Consumed by
+# `generate_release_notes: true` in .github/workflows/release.yml and by the
+# GitHub "Generate release notes" button.
+# https://docs.github.com/en/repositories/releasing-projects-on-github/automatically-generated-release-notes
+
+changelog:
+  exclude:
+    # Dependency-bump noise is summarized under "Maintenance", not listed
+    # PR-by-PR; bot-authored PRs are dropped from the notes entirely.
+    labels:
+      - dependencies
+      - skip-changelog
+    authors:
+      - dependabot[bot]
+      - renovate[bot]
+      - github-actions[bot]
+
+  categories:
+    - title: "Breaking Changes"
+      labels:
+        - breaking-change
+        - major
+
+    - title: "Security"
+      labels:
+        - security
+
+    - title: "Features"
+      labels:
+        - enhancement
+        - feature
+
+    - title: "Bug Fixes"
+      labels:
+        - bug
+        - bugfix
+        - fix
+
+    - title: "Documentation"
+      labels:
+        - documentation
+        - docs
+
+    - title: "Maintenance"
+      labels:
+        - chore
+        - maintenance
+        - ci
+        - infrastructure
+
+    # Catch-all for anything not matched above.
+    - title: "Other Changes"
+      labels:
+        - "*"

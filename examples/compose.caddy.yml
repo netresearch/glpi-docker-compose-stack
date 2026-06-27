@@ -6,8 +6,8 @@
 # Usage:
 #   docker compose -f compose.yml -f examples/compose.caddy.yml up -d
 #
-# The domain Caddy serves is taken from `SNIPEIT_HOST` in your .env
-# (e.g. `SNIPEIT_HOST=glpi.example.com`). Caddy auto-provisions a
+# The domain Caddy serves is taken from `GLPI_HOST` in your .env
+# (e.g. `GLPI_HOST=glpi.example.com`). Caddy auto-provisions a
 # Let's Encrypt certificate on first request to that hostname and
 # renews it transparently.
 #
@@ -15,7 +15,7 @@
 #   - The host running this stack is reachable on ports 80 + 443 from
 #     the public internet (HTTP-01 / TLS-ALPN-01 challenge), OR you
 #     configure DNS-01 in Caddyfile with provider credentials.
-#   - `SNIPEIT_HOST` resolves to this host's public IP via DNS.
+#   - `GLPI_HOST` resolves to this host's public IP via DNS.
 #
 # Caddy handles HTTP -> HTTPS redirect, HSTS, and certificate renewal
 # without further configuration.
@@ -37,7 +37,9 @@ services:
       - "443:443"
       - "443:443/udp"   # HTTP/3 (QUIC)
     environment:
-      SNIPEIT_HOST: ${SNIPEIT_HOST:-glpi.example.com}
+      # Passed through to the Caddyfile's `{$GLPI_HOST}` site-address
+      # placeholder, which Caddy resolves from its own process environment.
+      GLPI_HOST: ${GLPI_HOST:-glpi.example.com}
     volumes:
       - ./config/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data            # certs + ACME account state
