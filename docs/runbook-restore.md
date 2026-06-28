@@ -34,10 +34,19 @@ container), in three subdirectories:
 
 | Path | What | Cadence | Retention |
 |---|---|---|---|
-| `/backups/db/glpi-db-*.sql.gz` | `mysqldump --single-transaction --quick` of the GLPI database, gzip'd. Taken with `--databases`, so the dump is self-contained (`CREATE DATABASE IF NOT EXISTS` + `USE`) and includes `DROP TABLE IF EXISTS` per table | nightly 03:00 | capacity 5 GiB (oldest dropped) |
-| `/backups/files/glpi-files-*.tar.gz` | tar of the `glpi-var` volume (`/var/lib/glpi/files`: uploads, pictures, inventories, dumps, sessions, cache) | nightly 03:00 | outdated 30 days |
-| `/backups/config/glpi-config-*.tar.gz` | tar of the `glpi-config` volume (`/etc/glpi`: `config_db.php` + **`glpicrypt.key`** + local config) | nightly 03:00 | outdated 90 days |
+| `/backups/db/glpi-db-*.sql.gz.enc` | openssl-encrypted (aes-256-cbc/pbkdf2) gzip of `mysqldump --single-transaction --quick` of the GLPI database, gzip'd. Taken with `--databases`, so the dump is self-contained (`CREATE DATABASE IF NOT EXISTS` + `USE`) and includes `DROP TABLE IF EXISTS` per table | nightly 03:00 | capacity 5 GiB (oldest dropped) |
+| `/backups/files/glpi-files-*.tar.gz.enc` | openssl-encrypted gzip tar of the `glpi-var` volume (`/var/lib/glpi/files`: uploads, pictures, inventories, dumps, sessions, cache) | nightly 03:00 | outdated 30 days |
+| `/backups/config/glpi-config-*.tar.gz.enc` | openssl-encrypted gzip tar of the `glpi-config` volume (`/etc/glpi`: `config_db.php` + **`glpicrypt.key`** + local config) | nightly 03:00 | outdated 90 days |
 | `/backups/phpbu.log` | JSON log of every phpbu run (success and failure) | per-run append | by phpbu |
+
+> **Decryption is required.** Every archive is encrypted at rest with phpbu's
+> openssl crypt step, so the plaintext DB dump and `glpicrypt.key` never sit on
+> the backups volume. You need the **same `BACKUP_CRYPT_PASSWORD`** that produced
+> them (from the source stack's `.env` — store it separately; it is not in any
+> backup). Decrypt with:
+> `openssl enc -d -a -aes-256-cbc -pbkdf2 -pass pass:"$BACKUP_CRYPT_PASSWORD" -in FILE.enc -out -`
+> The restore commands below pipe through it. The `backup` container already has
+> `openssl` and `BACKUP_CRYPT_PASSWORD` in its env.
 
 Both tar artefacts are created by phpbu from the absolute paths `/snapshot/files`
 and `/snapshot/config` (the volumes are mounted there read-only). GNU tar
@@ -71,7 +80,9 @@ The dump is self-contained, so importing it drops + recreates every table it
 contains:
 
 ```bash
-docker compose exec -T backup sh -c "zcat /backups/db/glpi-db-${TS}.sql.gz" \
+docker compose exec -T backup sh -c \
+  'openssl enc -d -a -aes-256-cbc -pbkdf2 -pass pass:"$BACKUP_CRYPT_PASSWORD" \
+     -in "/backups/db/glpi-db-'"${TS}"'.sql.gz.enc" | zcat' \
   | docker compose exec -T db sh -c 'mariadb -uroot -p"$MARIADB_ROOT_PASSWORD"'
 ```
 
@@ -94,13 +105,13 @@ The app is stopped, so nothing is writing the volume. Use a throwaway
 container that mounts the target volume read-write and the backups read-only:
 
 ```bash
-docker run --rm -e TS="$TS" \
-  -v glpi-backups:/backups:ro \
-  -v glpi-var:/restore \
-  alpine sh -c '
-    cd /restore
-    rm -rf ./* ./.[!.]* 2>/dev/null || true
-    tar xzf "/backups/files/glpi-files-${TS}.tar.gz" --strip-components=2'
+docker compose exec -T backup sh -c \
+  'openssl enc -d -a -aes-256-cbc -pbkdf2 -pass pass:"$BACKUP_CRYPT_PASSWORD" \
+     -in "/backups/files/glpi-files-'"${TS}"'.tar.gz.enc"' \
+  | docker run --rm -i -v glpi-var:/restore alpine sh -c '
+      cd /restore
+      rm -rf ./* ./.[!.]* 2>/dev/null || true
+      tar xzf - --strip-components=2'
 ```
 
 ### 4. Restore the config volume (`glpi-config`) — the encryption key
@@ -109,13 +120,13 @@ Same pattern, but into `glpi-config`. **This is the step that re-instates
 `glpicrypt.key`.**
 
 ```bash
-docker run --rm -e TS="$TS" \
-  -v glpi-backups:/backups:ro \
-  -v glpi-config:/restore \
-  alpine sh -c '
-    cd /restore
-    rm -rf ./* ./.[!.]* 2>/dev/null || true
-    tar xzf "/backups/config/glpi-config-${TS}.tar.gz" --strip-components=2'
+docker compose exec -T backup sh -c \
+  'openssl enc -d -a -aes-256-cbc -pbkdf2 -pass pass:"$BACKUP_CRYPT_PASSWORD" \
+     -in "/backups/config/glpi-config-'"${TS}"'.tar.gz.enc"' \
+  | docker run --rm -i -v glpi-config:/restore alpine sh -c '
+      cd /restore
+      rm -rf ./* ./.[!.]* 2>/dev/null || true
+      tar xzf - --strip-components=2'
 
 # confirm both files are present
 docker run --rm -v glpi-config:/c:ro alpine ls -l /c/config_db.php /c/glpicrypt.key
