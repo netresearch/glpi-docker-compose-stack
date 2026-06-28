@@ -1,6 +1,6 @@
 {
   "$schema": "https://json.schemastore.org/github-branch-protection",
-  "_comment": "Documentation snapshot of the applied branch protection for `main`. Replay with: gh api -X PUT repos/netresearch/glpi-docker-compose-stack/branches/main/protection --input .github/branch-protection.json (then enable signed commits via .../protection/required_signatures).",
+  "_comment": "Documentation snapshot of the applied branch protection for `main`. The GitHub protection API rejects non-schema fields, so strip them on replay: jq 'del(.[\"$schema\"], ._comment, ._status, .required_signatures)' .github/branch-protection.json | gh api -X PUT repos/netresearch/glpi-docker-compose-stack/branches/main/protection --input - ; then enable signed commits separately: gh api -X POST repos/netresearch/glpi-docker-compose-stack/branches/main/protection/required_signatures",
   "_status": "Applied 2026-06-28. Required status checks use the real job-level check-run names (not workflow names). scorecard is NOT a required PR check \u2014 it runs on push-to-main + weekly schedule, never on PRs, so requiring it would block every PR.",
   "required_status_checks": {
     "strict": true,
