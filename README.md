@@ -51,7 +51,7 @@ The official `glpi/glpi` image is Apache + mod_php in a single container with a 
 | `app` | `ghcr.io/netresearch/glpi-php-fpm` | GLPI on php-fpm, socket-only, non-root |
 | `web` | `nginx:alpine` | serves `public/` + FastCGI to `app`, CSP/security headers |
 | `scheduler` | `ghcr.io/netresearch/ofelia` | runs GLPI `front/cron.php` (2 min) + phpbu (nightly) |
-| `backup` | `ghcr.io/netresearch/phpbu-docker` | nightly DB dump + `files/` + **config (crypt key)** archive |
+| `backup` _(opt-in: `--profile backup`)_ | `ghcr.io/netresearch/phpbu-docker` | nightly DB dump + `files/` + **config (crypt key)** archive |
 
 ## Quickstart
 
@@ -133,7 +133,7 @@ make down                 # stop (keep volumes)
   **CLI** mode (Setup → General → Automatic actions) for deterministic scheduling.
 - **Upgrades** — bump `.glpi-version` (+ `GLPI_IMAGE_TAG`), `make up`; the
   entrypoint runs a maintenance-wrapped `database:update`.
-- **Backups / restore** — see [`docs/runbook-restore.md`](docs/runbook-restore.md).
+- **Backups / restore** — see [`docs/runbook-restore.md`](docs/runbook-restore.md). The `backup` service (phpbu) is **opt-in** behind the `backup` compose profile — start it with `make backup-up` (or `docker compose --profile backup up -d`).
 - **Day-2 ops** — see [`docs/runbook-day2-ops.md`](docs/runbook-day2-ops.md).
 - **ofelia is host-wide:** with the docker socket mounted it runs the labelled
   jobs of **every** stack on the host — run only one labelled stack per host, or

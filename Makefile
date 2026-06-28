@@ -76,8 +76,11 @@ disable-observability: .env ## Remove observability overlay
 # Backup / restore
 # ────────────────────────────────────────────────────────────────────
 
-backup: ## Run a backup now (normally scheduled by ofelia at 03:00)
-	docker compose exec -T backup phpbu --configuration=/config/backup.json
+backup-up: .env ## Start the opt-in backup service (phpbu, behind the `backup` profile)
+	docker compose --profile backup up -d backup
+
+backup: ## Run a backup now (requires `make backup-up`; normally ofelia at 03:00)
+	docker compose --profile backup exec -T backup phpbu --configuration=/config/backup.json
 
 backup-list: ## List backup archives
 	docker compose exec -T backup ls -lh /backups
@@ -201,7 +204,7 @@ clean: ## DESTRUCTIVE: down + delete ALL volumes (db + uploads + backups)
 
 .PHONY: \
 	help init up down restart logs logs-app ps \
-	backup backup-list backup-verify \
+	backup backup-up backup-list backup-verify \
 	health test test-image test-bats hardening-check \
 	dev build lint pull upgrade \
 	shell console restore clean \

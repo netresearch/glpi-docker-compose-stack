@@ -14,17 +14,17 @@ name: _build-cell
 on:
   workflow_call:
     inputs:
-      version:       { type: string,  required: true }
-      major:         { type: string,  required: true }
-      major_minor:   { type: string,  required: true }
-      glpi_sha256:   { type: string,  required: true }
-      build_date:    { type: string,  required: true }
-      date_tag:      { type: string,  required: true }
-      registry:      { type: string,  required: true }
-      image_name:    { type: string,  required: true }
-      is_main_ref:           { type: boolean, required: true }
-      is_release_from_file:  { type: boolean, required: true }
-      push_artifacts:        { type: boolean, required: true }
+      version: {type: string, required: true}
+      major: {type: string, required: true}
+      major_minor: {type: string, required: true}
+      glpi_sha256: {type: string, required: true}
+      build_date: {type: string, required: true}
+      date_tag: {type: string, required: true}
+      registry: {type: string, required: true}
+      image_name: {type: string, required: true}
+      is_main_ref: {type: boolean, required: true}
+      is_release_from_file: {type: boolean, required: true}
+      push_artifacts: {type: boolean, required: true}
 
 permissions:
   contents: read

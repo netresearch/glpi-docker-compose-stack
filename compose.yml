@@ -13,6 +13,7 @@
 #   scheduler   — ofelia (Netresearch's fork), label-driven cron for GLPI's
 #                 front/cron.php (every 2 min) and phpbu (nightly)
 #   backup      — phpbu-docker, nightly DB dump + files/config archives
+#                 (opt-in: `--profile backup`)
 #
 # Quickstart:
 #   1. make init            # generates .env with random secrets
@@ -335,8 +336,6 @@ services:
     depends_on:
       app:
         condition: service_started
-      backup:
-        condition: service_started
     command: ["daemon"]
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
@@ -353,9 +352,16 @@ services:
   #
   # For off-host storage, bind-mount ./backups to a NAS/NFS share, or run
   # restic/rclone on the host reading the named volume.
+  #
+  # OPT-IN: behind the `backup` compose profile, so a plain `docker compose
+  # up -d` (and the default `make up`) brings up the working core without it.
+  # Enable with:  docker compose --profile backup up -d   (or `make backup-up`).
+  # This also decouples the default stack from the phpbu-docker image's
+  # availability — pin/replace the tag below for your environment.
   # ---------------------------------------------------------------------
   backup:
-    image: ghcr.io/netresearch/phpbu-docker:latest
+    profiles: ["backup"]
+    image: ghcr.io/netresearch/phpbu-docker:6
     restart: unless-stopped
     mem_limit: 256m
     cpus: 0.5
