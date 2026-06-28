@@ -212,14 +212,14 @@ services:
         max-size: "10m"
         max-file: "5"
     depends_on:
-      mysqld-exporter:
-        condition: service_started
-      nginx-prometheus-exporter:
-        condition: service_started
       # Uncomment together with the cadvisor service block above to enable
       # container-tier metrics:
       # cadvisor:
       #   condition: service_started
+      mysqld-exporter:
+        condition: service_started
+      nginx-prometheus-exporter:
+        condition: service_started
     command:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.path=/prometheus
