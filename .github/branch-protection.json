@@ -1,14 +1,21 @@
 {
   "$schema": "https://json.schemastore.org/github-branch-protection",
-  "_comment": "Documentation snapshot of the recommended branch protection for `main`. This file is NOT applied automatically; it is a config record so a new bootstrap of this repo can replay the rules. Apply with: gh api -X PUT repos/netresearch/glpi-docker-compose-stack/branches/main/protection --input .github/branch-protection.json",
-  "_status": "Not yet applied as of 2026-05-21 — `main` is currently unprotected. Intended baseline for the first cut of repo bootstrap.",
+  "_comment": "Documentation snapshot of the applied branch protection for `main`. The GitHub protection API rejects non-schema fields, so strip them on replay: jq 'del(.[\"$schema\"], ._comment, ._status, .required_signatures)' .github/branch-protection.json | gh api -X PUT repos/netresearch/glpi-docker-compose-stack/branches/main/protection --input - ; then enable signed commits separately: gh api -X POST repos/netresearch/glpi-docker-compose-stack/branches/main/protection/required_signatures",
+  "_status": "Applied 2026-06-28. Required status checks use the real job-level check-run names (not workflow names). scorecard is NOT a required PR check \u2014 it runs on push-to-main + weekly schedule, never on PRs, so requiring it would block every PR.",
   "required_status_checks": {
     "strict": true,
     "contexts": [
-      "lint",
-      "smoke-test",
-      "build",
-      "scorecard"
+      "yamllint",
+      "container-lint / hadolint",
+      "container-lint / shellcheck",
+      "docker compose config",
+      "overlay hardening",
+      "bats tests/bin",
+      "build / build (amd64)",
+      "build / build (arm64)",
+      "image-surface / container-structure-test",
+      "stack serves GLPI",
+      "init.sh is idempotent"
     ]
   },
   "enforce_admins": false,
