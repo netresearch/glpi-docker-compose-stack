@@ -41,7 +41,7 @@ deployment of [GLPI](https://glpi-project.org/) built around a purpose-built
   hardening posture.
 - **Supply-chain & CI**: daily multi-arch rebuild to absorb base-image CVE
   fixes, keyless Cosign signatures, in-image SBOMs, SLSA build provenance,
-  daily Trivy and osv-scanner scanning, OpenSSF Scorecard, and a lint suite
+  daily Trivy vulnerability scanning, OpenSSF Scorecard, and a lint suite
   (hadolint, shellcheck, yamllint, actionlint) plus bats and smoke tests.
   - `docker-bake.hcl` and a tag-triggered `release.yml` that builds, signs and
     publishes the canonical tag set (`<version>`, `<major.minor>`, `<major>`,
