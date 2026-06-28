@@ -5,21 +5,52 @@
     ":semanticCommits",
     "helpers:pinGitHubActionDigestsToSemver"
   ],
-  "schedule": ["before 6am on monday"],
+  "schedule": [
+    "before 6am on monday"
+  ],
   "customManagers": [
     {
       "customType": "regex",
-      "managerFilePatterns": ["/^\\.glpi-version$/"],
-      "matchStrings": ["^(?<currentValue>\\d+\\.\\d+\\.\\d+)\\s*$"],
+      "managerFilePatterns": [
+        "/^\\.glpi-version$/"
+      ],
+      "matchStrings": [
+        "^(?<currentValue>\\d+\\.\\d+\\.\\d+)\\s*$"
+      ],
       "depNameTemplate": "glpi-project/glpi",
       "datasourceTemplate": "github-releases",
       "extractVersionTemplate": "^(?<version>\\d+\\.\\d+\\.\\d+)$"
     },
     {
       "customType": "regex",
-      "managerFilePatterns": ["/^Dockerfile$/"],
+      "managerFilePatterns": [
+        "/^Dockerfile$/"
+      ],
       "matchStrings": [
         "ARG GLPI_VERSION=(?<currentValue>\\d+\\.\\d+\\.\\d+)"
+      ],
+      "depNameTemplate": "glpi-project/glpi",
+      "datasourceTemplate": "github-releases",
+      "extractVersionTemplate": "^(?<version>\\d+\\.\\d+\\.\\d+)$"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^Dockerfile$/"
+      ],
+      "matchStrings": [
+        "# renovate: datasource=docker depName=php versioning=docker\\nARG PHP_VERSION=(?<currentValue>\\S+)",
+        "# renovate: datasource=docker depName=alpine versioning=docker\\nARG ALPINE_VERSION=(?<currentValue>\\S+)"
+      ],
+      "datasourceTemplate": "docker"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^docker-bake\\.hcl$/"
+      ],
+      "matchStrings": [
+        "default = \"(?<currentValue>\\d+\\.\\d+\\.\\d+)\""
       ],
       "depNameTemplate": "glpi-project/glpi",
       "datasourceTemplate": "github-releases",
@@ -28,14 +59,22 @@
   ],
   "packageRules": [
     {
-      "matchDepNames": ["glpi-project/glpi"],
+      "matchDepNames": [
+        "glpi-project/glpi"
+      ],
       "commitMessageTopic": "GLPI",
-      "labels": ["glpi-bump"],
+      "labels": [
+        "glpi-bump"
+      ],
       "automerge": false
     },
     {
-      "matchManagers": ["github-actions"],
-      "labels": ["github-actions"],
+      "matchManagers": [
+        "github-actions"
+      ],
+      "labels": [
+        "github-actions"
+      ],
       "automerge": true,
       "automergeType": "pr",
       "platformAutomerge": true

@@ -224,17 +224,38 @@ fi
 # ---------------------------------------------------------------------
 if [ -n "${GLPI_CACHE_DSN:-}" ] || [ -n "${REDIS_HOST:-}" ]; then
     _dsn="${GLPI_CACHE_DSN:-redis://${REDIS_HOST}:${REDIS_PORT:-6379}}"
+    # The marker stores only a SHA-256 of the DSN, never the DSN itself — a
+    # DSN may carry a Redis password (redis://:pw@host) that must not be
+    # persisted (or logged) in cleartext.
+    _dsn_hash="$(printf '%s' "$_dsn" | sha256sum | cut -d' ' -f1)"
     _marker="$GLPI_VAR_DIR/_cache/.configured-dsn"
-    if [ "$(cat "$_marker" 2>/dev/null || true)" != "$_dsn" ]; then
-        log "configuring GLPI core cache → $_dsn"
+    if [ "$(cat "$_marker" 2>/dev/null || true)" != "$_dsn_hash" ]; then
+        log "configuring GLPI core cache backend"
         if run_console cache:configure --context=core --dsn="$_dsn" --no-interaction --quiet; then
-            printf '%s' "$_dsn" | su-exec www-data tee "$_marker" >/dev/null 2>&1 || true
+            printf '%s' "$_dsn_hash" | su-exec www-data tee "$_marker" >/dev/null 2>&1 || true
         else
             log "cache:configure failed — continuing with the filesystem cache"
         fi
     fi
-    unset _dsn _marker
+    unset _dsn _dsn_hash _marker
 fi
+
+# ---------------------------------------------------------------------
+# 7b. PHP session cookie Secure flag
+#
+# php.ini can't expand env vars, so the image ships session.cookie_secure = 0
+# (works on plain-HTTP local bring-up). Write a conf.d drop-in from
+# SESSION_COOKIE_SECURE here so HTTPS deployments (behind a TLS-terminating
+# proxy) get the Secure flag without a custom image. php-fpm reads conf.d at
+# startup, just below.
+# ---------------------------------------------------------------------
+case "${SESSION_COOKIE_SECURE:-0}" in
+    1 | true | on | yes) _secure=1 ;;
+    *) _secure=0 ;;
+esac
+printf 'session.cookie_secure = %s\n' "$_secure" \
+    > /usr/local/etc/php/conf.d/zz-session-secure.ini
+unset _secure
 
 # ---------------------------------------------------------------------
 # 8. Exec the main process
