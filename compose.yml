@@ -428,6 +428,11 @@ services:
       DB_DATABASE: ${GLPI_DB_NAME:-glpi}
       DB_USER: ${GLPI_DB_USER:-glpi}
       DB_PASSWORD: ${GLPI_DB_PASSWORD:-}
+      # At-rest encryption passphrase for the openssl crypt step in
+      # config/phpbu/backup.json. REQUIRED when the backup profile is enabled
+      # (an empty value makes phpbu's crypt step fail). `make init` generates a
+      # random one. Reaches the ofelia-exec'd phpbu via the container env.
+      BACKUP_CRYPT_PASSWORD: ${BACKUP_CRYPT_PASSWORD:-}
       TZ: ${TZ:-UTC}
     volumes:
       - ./config/phpbu/backup.json:/config/backup.json:ro
@@ -452,6 +457,10 @@ services:
       timeout: 10s
       start_period: 15s
       retries: 3
+    # phpbu must read GLPI's 0600/0660 config (oauth keys, glpicrypt.key) owned
+    # by www-data; run as root so cap_add DAC_OVERRIDE actually applies (caps are
+    # inert for a non-root uid). Opt-in + socket-less + :ro sources bound the risk.
+    user: "0:0"
     security_opt:
       - no-new-privileges:true
     cap_drop:

@@ -64,7 +64,7 @@ random_pw() {
 # ---------------------------------------------------------------------
 # 3. DB passwords — generate random if empty
 # ---------------------------------------------------------------------
-for var in GLPI_DB_PASSWORD DB_ROOT_PASSWORD; do
+for var in GLPI_DB_PASSWORD DB_ROOT_PASSWORD BACKUP_CRYPT_PASSWORD; do
   CUR=$(read_env "$var")
   if [[ -z "$CUR" ]]; then
     write_env "$var" "$(random_pw)"
