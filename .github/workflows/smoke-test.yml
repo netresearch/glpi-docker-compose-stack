@@ -131,6 +131,26 @@ jobs:
           docker compose logs --tail=200
           exit 1
 
+      - name: Assert GLPI routes legacy .php entry points (regression guard)
+        env:
+          PORT: '8080'
+        run: |
+          set -eu
+          # GLPI 11 routes /apirest.php, /front/*.php and /ajax/*.php through
+          # public/index.php. A blanket nginx `.php` deny would 403 these even
+          # though the login page at / still works (exactly the bug the serve
+          # check above cannot see). Assert none of them is forbidden.
+          rc=0
+          for p in /apirest.php /front/central.php /ajax/dashboard.php; do
+            code=$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:${PORT}${p}" || true)
+            echo "  ${p} -> HTTP ${code}"
+            if [ "$code" = "403" ] || [ "$code" = "000" ]; then
+              echo "::error::${p} returned ${code} — nginx is not routing a GLPI .php entry point"
+              rc=1
+            fi
+          done
+          [ "$rc" -eq 0 ] || { docker compose logs web --tail=50; exit 1; }
+
       - name: Assert app + web report healthy
         run: |
           set -eu
