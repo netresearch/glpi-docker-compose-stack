@@ -28,8 +28,8 @@
 # Resource limits (mem_limit / cpus) are sized for a small-org deployment
 # (single host, <=100 agents/users) and are intentionally explicit so
 # operators can tune them. Raise db.mem_limit as the dataset grows and
-# app.mem_limit (php-fpm pm.max_children * memory_limit = 25 * 512M) for more
-# concurrency.
+# app.mem_limit together with pm.max_children (zz-glpi.conf, default 10
+# workers ~ 1.5g) for more concurrency.
 
 name: glpi
 
@@ -57,6 +57,12 @@ x-glpi-env: &glpi-env
   GLPI_CACHE_DSN: ${GLPI_CACHE_DSN:-redis://valkey:6379}
   REDIS_HOST: valkey
   REDIS_PORT: "6379"
+  # Initial-install language (only consumed by database:install on first boot).
+  GLPI_DEFAULT_LANGUAGE: ${GLPI_DEFAULT_LANGUAGE:-en_GB}
+  # Set 1 when serving over HTTPS (behind a TLS-terminating proxy) so the
+  # entrypoint marks the PHP session cookie Secure. Default 0 for plain-HTTP
+  # local bring-up.
+  SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-0}
   TZ: ${TZ:-UTC}
 
 services:
@@ -99,6 +105,15 @@ services:
       - --server-id=1
     volumes:
       - db-data:/var/lib/mysql
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETUID
+      - SETGID
+
     healthcheck:
       test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
       interval: 10s
@@ -141,6 +156,14 @@ services:
       TZ: ${TZ:-UTC}
     volumes:
       - valkey-data:/data
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN          # entrypoint chowns /data to the valkey user
+      - DAC_OVERRIDE   # ...and accesses the existing appendonlydir across uids
+      - SETUID         # su-exec drops to the valkey user
+      - SETGID
+
     healthcheck:
       test: ["CMD", "valkey-cli", "ping"]
       interval: 10s
@@ -184,6 +207,8 @@ services:
         echo "[app-assets] synced $$(ls /shared-public | wc -l) entries"
     volumes:
       - app-public:/shared-public
+    security_opt:
+      - no-new-privileges:true
     networks:
       - glpi
 
@@ -221,15 +246,14 @@ services:
       - glpi-logs:/var/log/glpi               # application logs
       - fpm-sock:/run/php-fpm                  # php-fpm unix socket (shared with web)
     healthcheck:
-      # Composite check:
-      #   1. php-fpm /ping returns "pong" (the worker pool is accepting work)
-      #   2. the cron heartbeat file is no older than 300s — ofelia's
-      #      glpi-heartbeat job (labels below) touches it every minute. A
-      #      stale file means the scheduler died or lost the docker socket
-      #      and GLPI's automatic actions are no longer firing.
+      # Liveness only: php-fpm /ping returns "pong" (the worker pool is
+      # accepting FastCGI). This is what `web` gates on, so it must NOT depend
+      # on the scheduler — a dead scheduler should never stop the app from
+      # serving. Scheduler health is observed separately (docker compose ps /
+      # ofelia logs), not folded into app liveness.
       test:
         - CMD-SHELL
-        - 'SCRIPT_NAME=/ping SCRIPT_FILENAME=/ping REQUEST_METHOD=GET cgi-fcgi -bind -connect /run/php-fpm/glpi.sock 2>/dev/null | grep -q pong && test "$$(date +%s)" -le "$$(( $$(stat -c%Y /var/lib/glpi/files/.cron-heartbeat 2>/dev/null || echo 0) + 300 ))"'
+        - 'SCRIPT_NAME=/ping SCRIPT_FILENAME=/ping REQUEST_METHOD=GET cgi-fcgi -bind -connect /run/php-fpm/glpi.sock 2>/dev/null | grep -q pong'
       interval: 30s
       timeout: 10s
       # 180s covers first-boot database:install + the first heartbeat write.
@@ -258,13 +282,6 @@ services:
       ofelia.job-exec.glpi-cron.schedule: "@every 2m"
       ofelia.job-exec.glpi-cron.user: "www-data"
       ofelia.job-exec.glpi-cron.command: "php /var/www/glpi/front/cron.php"
-      # Liveness heartbeat — independent of glpi-cron so an application error
-      # in a task can't suppress it. The app healthcheck reads this file's
-      # mtime and goes unhealthy if it falls >300s behind, surfacing a dead
-      # scheduler or lost docker socket.
-      ofelia.job-exec.glpi-heartbeat.schedule: "@every 1m"
-      ofelia.job-exec.glpi-heartbeat.user: "www-data"
-      ofelia.job-exec.glpi-heartbeat.command: 'sh -c "touch /var/lib/glpi/files/.cron-heartbeat"'
     networks:
       - glpi
 
@@ -327,8 +344,39 @@ services:
   # the nightly phpbu backup via labels on the target services. Mounts the
   # host docker socket read-only so it can `docker exec`.
   # ---------------------------------------------------------------------
+  # docker-socket-proxy — a least-privilege chokepoint in front of the host
+  # Docker socket. ofelia needs to list containers + create/start execs; it does
+  # NOT need (and must not have) the full Docker API, which is equivalent to
+  # host root (a caller can create a privileged container bind-mounting /).
+  # Only CONTAINERS + EXEC + POST are allowed here; everything else is denied.
+  docker-socket-proxy:
+    image: ghcr.io/tecnativa/docker-socket-proxy:0.3.0
+    restart: unless-stopped
+    mem_limit: 64m
+    cpus: 0.25
+    logging: *logging
+    environment:
+      CONTAINERS: "1"   # list/inspect containers (read labels)
+      EXEC: "1"         # create exec instances
+      POST: "1"         # allow the POSTs that exec create/start need
+      TZ: ${TZ:-UTC}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:2375/_ping"]
+      interval: 10s
+      timeout: 3s
+      start_period: 10s
+      retries: 5
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    networks:
+      - glpi
+
   scheduler:
-    image: ghcr.io/netresearch/ofelia:latest
+    image: ghcr.io/netresearch/ofelia:latest@sha256:e71dd1d4f634e317355400e089b5a7547359819e10b9297f43d8e3871a36ed4a
     restart: unless-stopped
     mem_limit: 64m
     cpus: 0.25
@@ -336,11 +384,17 @@ services:
     depends_on:
       app:
         condition: service_started
+      docker-socket-proxy:
+        condition: service_healthy
     command: ["daemon"]
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      # Drive jobs through the restricted proxy instead of the raw host socket.
+      DOCKER_HOST: tcp://docker-socket-proxy:2375
+      TZ: ${TZ:-UTC}
     security_opt:
       - no-new-privileges:true
+    cap_drop:
+      - ALL
     networks:
       - glpi
 
@@ -400,6 +454,12 @@ services:
       retries: 3
     security_opt:
       - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
     labels:
       ofelia.enabled: "true"
       ofelia.job-exec.glpi-backup.schedule: "0 0 3 * * *"

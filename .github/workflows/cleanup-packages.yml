@@ -30,15 +30,23 @@ jobs:
     permissions:
       packages: write
     steps:
-      - name: Delete old untagged versions
-        uses: actions/delete-package-versions@e5bc658cc4c965c472efe991f8beea3981499c55 # v5.0.0
+      # Manifest-list + referrer aware: actions/delete-package-versions is NOT,
+      # so it would happily delete a per-arch CHILD manifest (or a cosign sig /
+      # SLSA attestation referrer) of a LIVE tagged index once enough newer
+      # untagged versions exist — silently breaking multi-arch pulls and
+      # verification (the same failure mode that bricked ghcr's phpbu-docker).
+      # dataaxiom/ghcr-cleanup-action understands manifest lists: it keeps the
+      # children + referrers of every tagged image and only removes orphans.
+      - name: Delete orphaned / partial versions (manifest-aware)
+        uses: dataaxiom/ghcr-cleanup-action@d52806a0dc70b430571a37da1fde39733ffd640f # v1.2.2
         with:
-          package-name: ${{ env.PACKAGE_NAME }}
-          package-type: container
-          # Keep the 10 most recent untagged versions as a rollback margin.
-          min-versions-to-keep: 10
-          # Only ever delete untagged versions — released tags are immutable here.
-          delete-only-untagged-versions: true
+          packages: ${{ env.PACKAGE_NAME }}
+          delete-untagged: true          # orphaned untagged manifests
+          delete-partial-images: true    # incomplete multi-arch pushes
+          delete-ghost-images: true      # tags whose children were GC'd
+          keep-n-untagged: 10            # rollback margin
+          # Children + cosign/SLSA referrers of TAGGED images are retained
+          # automatically — tagged releases are never broken.
 
       - name: Summary
         env:
@@ -49,5 +57,5 @@ jobs:
             echo ""
             echo "- Package: \`${PACKAGE_NAME}\` (container)"
             echo "- Kept minimum: 10 untagged versions"
-            echo "- Deleted only untagged: true (tagged releases untouched)"
+            echo "- Manifest-aware prune (children + sig/attestation referrers of tagged images kept)"
           } >> "$GITHUB_STEP_SUMMARY"

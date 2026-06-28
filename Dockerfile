@@ -23,7 +23,9 @@
 #   GLPI_VERSION    — GLPI release (default 11.0.8 — keep in sync with .glpi-version)
 #   GLPI_SHA256     — sha256 of glpi-${GLPI_VERSION}.tgz (supply-chain pin; "" skips)
 
+# renovate: datasource=docker depName=php versioning=docker
 ARG PHP_VERSION=8.4
+# renovate: datasource=docker depName=alpine versioning=docker
 ARG ALPINE_VERSION=3.21
 
 # =====================================================================

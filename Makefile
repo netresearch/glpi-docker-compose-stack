@@ -83,10 +83,10 @@ backup: ## Run a backup now (requires `make backup-up`; normally ofelia at 03:00
 	docker compose --profile backup exec -T backup phpbu --configuration=/config/backup.json
 
 backup-list: ## List backup archives
-	docker compose exec -T backup ls -lh /backups
+	docker compose --profile backup exec -T backup ls -lh /backups
 
 backup-verify: ## Sanity-check that last night's backup is on disk + non-zero
-	@docker compose exec -T backup sh -c '\
+	@docker compose --profile backup exec -T backup sh -c '\
 		latest=$$(ls -t /backups/db/*.sql.gz 2>/dev/null | head -1); \
 		if [ -z "$$latest" ]; then \
 			echo "✗ no DB backups in /backups/db"; exit 1; \
@@ -168,6 +168,9 @@ lint: ## Run hadolint + shellcheck + yamllint via Docker (no local install)
 		cytopia/yamllint:1 \
 		-d "{extends: default, rules: {line-length: disable, document-start: disable, truthy: {check-keys: false}, comments: {min-spaces-from-content: 1}}}" \
 		.github/workflows .hadolint.yaml compose.yml
+	@printf '\033[1;34m[lint]\033[0m actionlint .github/workflows\n'
+	docker run --rm -v $(CURDIR):/work -w /work \
+		rhysd/actionlint:latest -color
 
 # ────────────────────────────────────────────────────────────────────
 # Upgrade

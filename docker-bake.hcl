@@ -43,14 +43,13 @@ variable "GLPI_VERSION" {
   default = "11.0.8"
 }
 
-# GLPI major.minor, for the floating "11.0" tag.
+# GLPI major.minor + major, DERIVED from GLPI_VERSION so only GLPI_VERSION
+# (and .glpi-version / the Dockerfile ARG) needs bumping — no drift.
 variable "GLPI_MINOR" {
-  default = "11.0"
+  default = regex_replace(GLPI_VERSION, "^([0-9]+\\.[0-9]+)\\..*$", "$1")
 }
-
-# GLPI major, for the floating "11" tag.
 variable "GLPI_MAJOR" {
-  default = "11"
+  default = regex_replace(GLPI_VERSION, "^([0-9]+)\\..*$", "$1")
 }
 
 # sha256 of glpi-${GLPI_VERSION}.tgz — supply-chain pin passed straight to the
@@ -157,4 +156,7 @@ target "dev" {
   # No registry push and no attestations for a throwaway local image.
   attest = []
   output = ["type=docker"]
+  # The GHA cache backend needs ACTIONS_* tokens that don't exist locally.
+  cache-from = []
+  cache-to   = []
 }
