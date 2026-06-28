@@ -105,15 +105,13 @@ The app is stopped, so nothing is writing the volume. Use a throwaway
 container that mounts the target volume read-write and the backups read-only:
 
 ```bash
-docker run --rm -e TS="$TS" -e BACKUP_CRYPT_PASSWORD="$BACKUP_CRYPT_PASSWORD" \
-  -v glpi-backups:/backups:ro \
-  -v glpi-var:/restore \
-  alpine sh -c '
-    apk add --no-cache openssl >/dev/null
-    cd /restore
-    rm -rf ./* ./.[!.]* 2>/dev/null || true
-    openssl enc -d -a -aes-256-cbc -pbkdf2 -pass pass:"$BACKUP_CRYPT_PASSWORD" \
-      -in "/backups/files/glpi-files-${TS}.tar.gz.enc" | tar xz --strip-components=2'
+docker compose exec -T backup sh -c \
+  'openssl enc -d -a -aes-256-cbc -pbkdf2 -pass pass:"$BACKUP_CRYPT_PASSWORD" \
+     -in "/backups/files/glpi-files-'"${TS}"'.tar.gz.enc"' \
+  | docker run --rm -i -v glpi-var:/restore alpine sh -c '
+      cd /restore
+      rm -rf ./* ./.[!.]* 2>/dev/null || true
+      tar xzf - --strip-components=2'
 ```
 
 ### 4. Restore the config volume (`glpi-config`) — the encryption key
@@ -122,15 +120,13 @@ Same pattern, but into `glpi-config`. **This is the step that re-instates
 `glpicrypt.key`.**
 
 ```bash
-docker run --rm -e TS="$TS" -e BACKUP_CRYPT_PASSWORD="$BACKUP_CRYPT_PASSWORD" \
-  -v glpi-backups:/backups:ro \
-  -v glpi-config:/restore \
-  alpine sh -c '
-    apk add --no-cache openssl >/dev/null
-    cd /restore
-    rm -rf ./* ./.[!.]* 2>/dev/null || true
-    openssl enc -d -a -aes-256-cbc -pbkdf2 -pass pass:"$BACKUP_CRYPT_PASSWORD" \
-      -in "/backups/config/glpi-config-${TS}.tar.gz.enc" | tar xz --strip-components=2'
+docker compose exec -T backup sh -c \
+  'openssl enc -d -a -aes-256-cbc -pbkdf2 -pass pass:"$BACKUP_CRYPT_PASSWORD" \
+     -in "/backups/config/glpi-config-'"${TS}"'.tar.gz.enc"' \
+  | docker run --rm -i -v glpi-config:/restore alpine sh -c '
+      cd /restore
+      rm -rf ./* ./.[!.]* 2>/dev/null || true
+      tar xzf - --strip-components=2'
 
 # confirm both files are present
 docker run --rm -v glpi-config:/c:ro alpine ls -l /c/config_db.php /c/glpicrypt.key
