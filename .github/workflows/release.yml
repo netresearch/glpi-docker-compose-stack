@@ -68,14 +68,26 @@ jobs:
           # rather than interpolating into the script body (sonarcloud
           # githubactions:S7630, shell injection).
           REF_NAME: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           # Defensive 'v' strip even though the tag filter already excludes it.
           VERSION="${REF_NAME#v}"
+          # Is this the newest semver tag in the repo? An out-of-order / backport
+          # release must NOT move the GH "Latest" badge (and ideally not the
+          # floating image tags) onto an older version.
+          NEWEST=$(gh api "repos/${REPO}/git/refs/tags" \
+                     --jq '.[].ref | ltrimstr("refs/tags/")' 2>/dev/null \
+                   | sed 's/^v//' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
+                   | sort -V | tail -1)
+          IS_NEWEST=true
+          [ -n "$NEWEST" ] && [ "$VERSION" != "$NEWEST" ] && IS_NEWEST=false
           {
             echo "version=$VERSION"
             echo "major=$(echo "$VERSION" | cut -d. -f1)"
             echo "minor=$(echo "$VERSION" | cut -d. -f1-2)"
+            echo "is_newest=$IS_NEWEST"
             echo "build_date=$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
             echo "git_sha=$(git rev-parse --short HEAD)"
           } >> "$GITHUB_OUTPUT"
@@ -141,6 +153,10 @@ jobs:
         with:
           # Auto-categorized from .github/release.yml; prepend the usage block.
           generate_release_notes: true
+          # Only the newest semver release gets the "Latest" badge — a backport
+          # release of an older line must not steal it (GH marks latest by
+          # creation time otherwise).
+          make_latest: ${{ steps.version.outputs.is_newest }}
           body: |
             ## Container image
 

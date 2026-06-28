@@ -122,7 +122,7 @@ each on its own named volume.
 
 ```bash
 make logs                 # tail all services
-make console -- glpi:cache:clear      # run any bin/console command
+make console CMD="cache:clear"         # run any bin/console command
 make ps                   # status
 make down                 # stop (keep volumes)
 ```
