@@ -134,21 +134,30 @@ jobs:
       - name: Assert app + web report healthy
         run: |
           set -eu
-          docker compose ps
-          rc=0
-          for svc in app web; do
-            cid=$(docker compose ps -q "$svc")
-            if [ -z "$cid" ]; then
-              echo "::error::no container found for service $svc"; rc=1; continue
+          # web depends_on `app: service_healthy`, so it only starts once app is
+          # healthy (~2-3 min into the GLPI install). web is then functional —
+          # the serve-check above already proved it — but its docker healthcheck
+          # (start_period 20s + interval 30s) needs a cycle to flip to "healthy".
+          # Poll for up to 120s instead of checking once.
+          deadline=$(( $(date +%s) + 120 ))
+          while :; do
+            docker compose ps
+            rc=0
+            for svc in app web; do
+              cid=$(docker compose ps -q "$svc")
+              if [ -z "$cid" ]; then echo "$svc: no container yet"; rc=1; continue; fi
+              health=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$cid")
+              echo "$svc: $health"
+              [ "$health" = "healthy" ] || rc=1
+            done
+            [ "$rc" -eq 0 ] && { echo "app + web report healthy"; break; }
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "::error::app/web did not become healthy within 120s"
+              docker compose logs --tail=200
+              exit 1
             fi
-            health=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$cid")
-            echo "$svc: $health"
-            [ "$health" = "healthy" ] || { echo "::error::$svc is not healthy ($health)"; rc=1; }
+            sleep 6
           done
-          if [ "$rc" -ne 0 ]; then
-            docker compose logs --tail=200
-            exit 1
-          fi
 
       - name: Tear down (cleanup)
         if: always()
