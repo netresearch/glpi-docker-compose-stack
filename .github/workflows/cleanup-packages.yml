@@ -41,7 +41,6 @@ jobs:
         uses: dataaxiom/ghcr-cleanup-action@d52806a0dc70b430571a37da1fde39733ffd640f # v1.2.2
         with:
           packages: ${{ env.PACKAGE_NAME }}
-          delete-untagged: true          # orphaned untagged manifests
           delete-partial-images: true    # incomplete multi-arch pushes
           delete-ghost-images: true      # tags whose children were GC'd
           keep-n-untagged: 10            # rollback margin
