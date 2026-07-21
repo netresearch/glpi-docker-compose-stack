@@ -3,16 +3,28 @@
 #
 # Static checks for the glpi-docker-compose-stack repo.
 #
-# Splits into:
-#   - container-lint  → delegates Dockerfile (hadolint) + shellcheck on shipped
-#                       scripts to netresearch/.github's reusable
-#                       lint-container.yml on @main. Reusable pins hadolint to
-#                       v2.14.0, which handles Docker 25's HEALTHCHECK
-#                       --start-interval correctly. (Earlier v2.12.0 pin was a
-#                       bug — see netresearch/.github#141 + a4a763e.)
-#   - compose-validate → stays inline. Validates docker compose config with
-#                        repo-specific .env.example placeholder substitution
-#                        (caller-specific shape that doesn't generalise).
+# LINT + SECURITY surface. Where an org reusable in netresearch/.github
+# faithfully reproduces a check, we delegate to it (one call site, pinned
+# SHAs inside the leaf, harden-runner); where the repo needs a bespoke shape
+# the org leaf can't express, the job stays inline. The bespoke multi-arch
+# publish build (build.yml / _build-cell.yml), the smoke-test, the overlay-
+# hardening gate and the bats suite are deliberately NOT routed through the
+# org meta (docker-image-ci.yml) — its `build` job is unconditional and would
+# force a single-arch validation build on this native-multiarch repo. So we
+# call the granular org LEAVES directly instead of the meta.
+#
+# Jobs:
+#   - container-lint   → delegates Dockerfile (hadolint) + shellcheck on
+#                        shipped scripts to lint-container.yml@main. The leaf
+#                        pins hadolint v2.14.0, which handles Docker 25's
+#                        HEALTHCHECK --start-interval correctly. (Earlier
+#                        v2.12.0 pin was a bug — netresearch/.github#141 +
+#                        a4a763e.)
+#   - lint-compose     → delegates `docker compose config` validation to
+#                        lint-compose.yml@main. env-substitutions supplies the
+#                        two empty DB-password placeholders so interpolation
+#                        resolves without real secrets — same contract the
+#                        former inline compose-validate job had.
 #   - overlay-hardening → stays inline. Calls tests/lint/hardening-check.sh
 #                        to enforce security_opt:[no-new-privileges:true] +
 #                        cap_drop:[ALL] on every long-running service that
@@ -20,13 +32,21 @@
 #                        Background: an overlay can ship a service without
 #                        hardening because compose anchors do not survive
 #                        across separate overlay files — this gate catches it.
-#   - yamllint         → stays inline. The repo has no .yamllint.yml config
-#                        file; rules are passed via config_data here to keep
-#                        the contract local.
+#   - yamllint         → stays inline (NOT routed through lint-yaml.yml@main).
+#                        Three deliberate divergences: this gate is BLOCKING,
+#                        scoped to specific files, and uses truthy
+#                        check-keys:false. The org leaf scans the WHOLE repo,
+#                        uses different rules, and defaults to non-blocking
+#                        (strict=false) — adopting it would silently weaken a
+#                        required check and rename it. Kept bespoke.
 #   - bats             → regression suite for bin/env-set.sh +
 #                        bin/compose-file.sh under tests/bin/. Uses
 #                        bats-core/bats-action to install bats + bats-support
 #                        + bats-assert on the runner; failures block PRs.
+#   - gitleaks         → delegates secret scanning (betterleaks, full history,
+#                        SARIF → code scanning) to gitleaks.yml@main.
+#   - dependency-review → delegates PR dependency-diff review to
+#                        dependency-review.yml@main (pull_request only).
 
 name: lint
 
@@ -49,25 +69,21 @@ jobs:
     with:
       shell-scandirs: ./rootfs/usr/local/bin ./bin
 
-  compose-validate:
-    name: docker compose config
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-      - name: Validate compose.yml
-        run: |
-          cp .env.example .env
-          # supply just-good-enough placeholders so validation passes
-          # (GLPI's only .env secrets are the DB passwords; its crypt key is
-          # minted on first boot inside the glpi-config volume)
-          sed -i \
-            -e 's/^GLPI_DB_PASSWORD=$/GLPI_DB_PASSWORD=ci-placeholder/' \
-            -e 's/^DB_ROOT_PASSWORD=$/DB_ROOT_PASSWORD=ci-placeholder/' \
-            .env
-          docker compose config --quiet
-          docker compose -f compose.yml config --quiet
+  lint-compose:
+    # Delegates `docker compose config` validation to the org leaf. It copies
+    # .env.example -> .env (env-from-example, default true) and fills the two
+    # empty DB-password assignments with placeholders so interpolation
+    # resolves — the same contract the former inline compose-validate job had.
+    # GLPI's only .env secrets are the DB passwords; its crypt key is minted on
+    # first boot inside the glpi-config volume.
+    uses: netresearch/.github/.github/workflows/lint-compose.yml@main
+    permissions:
+      contents: read
+    with:
+      compose-files: compose.yml
+      env-substitutions: |
+        GLPI_DB_PASSWORD=ci-placeholder
+        DB_ROOT_PASSWORD=ci-placeholder
 
   overlay-hardening:
     name: overlay hardening
@@ -140,3 +156,19 @@ jobs:
           file-install: false
       - name: Run regression suite
         run: bats tests/bin/
+
+  gitleaks:
+    # Secret scanning over full git history (betterleaks), SARIF -> code
+    # scanning. The leaf skips merge_group + dependabot internally.
+    uses: netresearch/.github/.github/workflows/gitleaks.yml@main
+    permissions:
+      contents: read
+      security-events: write
+
+  dependency-review:
+    # Reviews the dependency diff on pull requests. The leaf gates itself on
+    # github.event_name == 'pull_request', so it no-ops on push.
+    uses: netresearch/.github/.github/workflows/dependency-review.yml@main
+    permissions:
+      contents: read
+      pull-requests: write
