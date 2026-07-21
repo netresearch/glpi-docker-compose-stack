@@ -8,7 +8,7 @@
       "yamllint",
       "container-lint / hadolint",
       "container-lint / shellcheck",
-      "docker compose config",
+      "lint-compose / docker compose config",
       "overlay hardening",
       "bats tests/bin",
       "build / build (amd64)",
