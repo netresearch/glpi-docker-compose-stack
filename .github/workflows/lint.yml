@@ -106,7 +106,11 @@ jobs:
           # parse it programmatically here).
           YQ_SHA256=d56bf5c6819e8e696340c312bd70f849dc1678a7cda9c2ad63eebd906371d56b
           tmp=$(mktemp)
-          curl -fsSL \
+          # --proto/--proto-redir '=https' pins the transfer (and any redirect,
+          # e.g. github.com -> objects.githubusercontent.com) to HTTPS so a
+          # crafted redirect can't downgrade to http (SonarCloud S6506). The
+          # payload is SHA256-verified below regardless.
+          curl --proto '=https' --proto-redir '=https' -fsSL \
             "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64" \
             -o "$tmp"
           actual=$(sha256sum "$tmp" | awk '{print $1}')
