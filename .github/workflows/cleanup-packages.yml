@@ -5,56 +5,56 @@
 #
 # The daily build.yml pushes a fresh multi-arch image; each push leaves the
 # previous build's per-arch child manifests UNTAGGED behind the moving tags
-# (latest / 11 / 11.0 / dated). Left unchecked these untagged versions
-# accumulate forever. This job prunes them while keeping a safety margin, and
-# NEVER touches tagged versions (no released image is ever deleted here).
+# (latest / 11 / 11.0 / sha-<commit>). Left unchecked these untagged versions
+# accumulate forever. This job prunes them and NEVER touches tagged versions
+# (no released image is ever deleted here).
+#
+# Retention is delegated to the shared netresearch/.github reusable so every
+# repo prunes GHCR by the same rules; this workflow carries no step-level
+# actions of its own.
+#
+# Why the age-based standard is safe here: every build gets its OWN immutable
+# tag — _build-cell.yml attaches `<version>-<YYYYMMDD>` (and `sha-<commit>`)
+# to every merge job, so each daily image stays reachable as e.g.
+# `11.0.8-20260715` for as long as GHCR keeps it. Rollback targets are TAGGED
+# images, and this retention job only ever deletes UNTAGGED versions that no
+# tagged manifest still references.
 
 name: Cleanup Old Packages
 
 on:
   workflow_dispatch:
+    inputs:
+      dry-run:
+        description: 'List what would be deleted without deleting it'
+        required: false
+        type: boolean
+        default: false
   schedule:
     # Weekly, Sundays 03:00 UTC.
     - cron: '0 3 * * 0'
 
-# Deny by default; the single job opts into packages:write only.
+# Deny by default; the single job opts into packages:write only — which is
+# exactly the union of the called workflow's two job permission sets.
 permissions: {}
-
-env:
-  PACKAGE_NAME: glpi-php-fpm
 
 jobs:
   cleanup:
     name: prune untagged versions
-    runs-on: ubuntu-latest
     permissions:
       packages: write
-    steps:
-      # Manifest-list + referrer aware: actions/delete-package-versions is NOT,
-      # so it would happily delete a per-arch CHILD manifest (or a cosign sig /
-      # SLSA attestation referrer) of a LIVE tagged index once enough newer
-      # untagged versions exist — silently breaking multi-arch pulls and
-      # verification (the same failure mode that bricked ghcr's phpbu-docker).
-      # dataaxiom/ghcr-cleanup-action understands manifest lists: it keeps the
-      # children + referrers of every tagged image and only removes orphans.
-      - name: Delete orphaned / partial versions (manifest-aware)
-        uses: dataaxiom/ghcr-cleanup-action@d52806a0dc70b430571a37da1fde39733ffd640f # v1.2.2
-        with:
-          packages: ${{ env.PACKAGE_NAME }}
-          delete-partial-images: true    # incomplete multi-arch pushes
-          delete-ghost-images: true      # tags whose children were GC'd
-          keep-n-untagged: 10            # rollback margin
-          # Children + cosign/SLSA referrers of TAGGED images are retained
-          # automatically — tagged releases are never broken.
-
-      - name: Summary
-        env:
-          PACKAGE_NAME: ${{ env.PACKAGE_NAME }}
-        run: |
-          {
-            echo "## Package Cleanup Summary"
-            echo ""
-            echo "- Package: \`${PACKAGE_NAME}\` (container)"
-            echo "- Kept minimum: 10 untagged versions"
-            echo "- Manifest-aware prune (children + sig/attestation referrers of tagged images kept)"
-          } >> "$GITHUB_STEP_SUMMARY"
+    uses: netresearch/.github/.github/workflows/ghcr-retention.yml@main
+    with:
+      package-name: glpi-php-fpm
+      # This image has NO edge channel and its release tags carry no 'v'
+      # prefix (bare semver: 11.0.8 / 11.0 / 11, plus 11.0.8-<date>,
+      # sha-<commit> and the sha256-… signature/attestation tags). Matching
+      # every tag as a release tag states the guarantee explicitly: a tagged
+      # version is never deleted, whatever the edge patterns default to.
+      release-tag-patterns: '*'
+      # Replaces the previous `keep-n-untagged: 10` count floor. The daily
+      # rebuild produces one image per day, so a 7-day age floor keeps a
+      # comparable margin of recent untagged versions — and the versions it
+      # can delete at all are only those NO tagged manifest references.
+      orphan-max-age-days: 7
+      dry-run: ${{ inputs.dry-run || false }}
