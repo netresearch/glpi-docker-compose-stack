@@ -5,184 +5,121 @@
 #
 # Triggered by pushing one of THIS repo's own release tags — bare semver, NO
 # 'v' prefix (e.g. 11.0.8), matching the bundled GLPI version. It builds the
-# multi-arch image through docker-bake.hcl, pushes the canonical tag set
-# (<version>, <major.minor>, <major>, latest), cosign-signs each tag, and
-# publishes a GitHub Release with auto-categorized notes (.github/release.yml).
-#
-# The daily build.yml keeps the same floating tags fresh against new base-image
-# CVEs; this workflow is the signed, release-noted cut for a specific GLPI
-# version. Tagging is done locally (signed tag) — see github-release flow.
+# multi-arch image through docker-bake.hcl, pushes + signs the canonical tag
+# set, emits SBOM + provenance, and publishes a GitHub Release — all via the
+# shared netresearch/.github reusables so no external action is pinned here.
 
 name: Release
 
 on:
   push:
-    # Bare semver, no 'v' prefix. In GitHub's tag filter syntax `+` means
-    # "one or more of the preceding character", so [0-9]+ is one-or-more digits
-    # and a leading 'v' would NOT match — enforcing the no-v-prefix convention.
+    # Bare semver, no 'v' prefix (matches the bundled GLPI version).
     tags:
       - '[0-9]+.[0-9]+.[0-9]+'
 
-# Deny by default; each job opts into exactly what it needs.
 permissions: {}
 
-env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository_owner }}/glpi-php-fpm
-
 jobs:
-  release:
-    name: build, sign & release
+  # Resolve version facts for the release step (the build derives its own via
+  # pre-build-command). No external actions — just the runner's gh CLI.
+  version:
+    name: Resolve version
     runs-on: ubuntu-latest
     permissions:
-      contents: write       # create the GitHub Release
-      packages: write       # push image to ghcr.io
-      id-token: write       # keyless cosign signing + provenance (OIDC)
-      attestations: write   # SLSA build provenance
+      contents: read
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      is_newest: ${{ steps.v.outputs.is_newest }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-
-      # QEMU so a single bake call can emit linux/arm64 alongside the native
-      # amd64 runner. (The daily build.yml uses native per-arch runners instead;
-      # for a once-per-release cut, emulation is the simpler tradeoff.)
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@06116385d9baf250c9f4dcb4858b16962ea869c3 # v4.1.0
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
-
-      - name: Log in to ghcr.io
-        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Derive version facts from tag
-        id: version
+      - id: v
         env:
-          # github.ref_name is the pushed tag. Route it through an env var
-          # rather than interpolating into the script body (sonarcloud
-          # githubactions:S7630, shell injection).
           REF_NAME: ${{ github.ref_name }}
           REPO: ${{ github.repository }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          # Defensive 'v' strip even though the tag filter already excludes it.
-          VERSION="${REF_NAME#v}"
-          # Is this the newest semver tag in the repo? An out-of-order / backport
-          # release must NOT move the GH "Latest" badge (and ideally not the
-          # floating image tags) onto an older version.
+          V="$REF_NAME"
+          # An out-of-order / backport release must NOT move the "Latest" badge
+          # onto an older version.
           NEWEST=$(gh api "repos/${REPO}/git/refs/tags" \
                      --jq '.[].ref | ltrimstr("refs/tags/")' 2>/dev/null \
                    | sed 's/^v//' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
                    | sort -V | tail -1)
           IS_NEWEST=true
-          [ -n "$NEWEST" ] && [ "$VERSION" != "$NEWEST" ] && IS_NEWEST=false
+          if [ -n "$NEWEST" ] && [ "$V" != "$NEWEST" ]; then
+            IS_NEWEST=false
+          fi
           {
-            echo "version=$VERSION"
-            echo "major=$(echo "$VERSION" | cut -d. -f1)"
-            echo "minor=$(echo "$VERSION" | cut -d. -f1-2)"
+            echo "version=$V"
             echo "is_newest=$IS_NEWEST"
-            echo "build_date=$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-            echo "git_sha=$(git rev-parse --short HEAD)"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Resolve GLPI tarball sha256 (supply-chain pin)
-        id: sha
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          set -euo pipefail
-          # The release tag IS the bundled GLPI version, so hash that exact
-          # upstream asset and pin the build to it — a swapped release artifact
-          # cannot make it into a signed image.
-          URL="https://github.com/glpi-project/glpi/releases/download/${VERSION}/glpi-${VERSION}.tgz"
-          GLPI_SHA256=$(curl -fsSL "$URL" | sha256sum | cut -d' ' -f1)
-          [ -n "$GLPI_SHA256" ] || { echo "could not hash $URL" >&2; exit 1; }
-          echo "glpi_sha256=$GLPI_SHA256" >> "$GITHUB_OUTPUT"
-          echo "─ GLPI ${VERSION}  sha256=${GLPI_SHA256:0:16}…"
+  # Multi-arch build (QEMU) + push + sign every produced tag + SBOM + provenance.
+  # The GLPI tarball sha256 is resolved in pre-build-command and pins the build.
+  build:
+    needs: version
+    uses: netresearch/.github/.github/workflows/build-container-bake.yml@main
+    permissions:
+      contents: read
+      packages: write
+      security-events: write
+      id-token: write
+    with:
+      bake-file: docker-bake.hcl
+      targets: glpi
+      push: true
+      sign: true
+      sbom: true
+      attest: true
+      scan: false
+      pre-build-command: |
+        set -euo pipefail
+        V="$GITHUB_REF_NAME"
+        # The release tag IS the bundled GLPI version — hash that exact upstream
+        # asset and pin the build to it (a swapped artifact cannot be signed).
+        URL="https://github.com/glpi-project/glpi/releases/download/${V}/glpi-${V}.tgz"
+        GLPI_SHA256=$(curl -fsSL "$URL" | sha256sum | cut -d' ' -f1)
+        [ -n "$GLPI_SHA256" ] || { echo "could not hash $URL" >&2; exit 1; }
+        {
+          echo "GLPI_VERSION=$V"
+          echo "GLPI_SHA256=$GLPI_SHA256"
+          echo "BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          echo "GIT_SHA=$(git rev-parse --short HEAD)"
+        } >> "$GITHUB_ENV"
 
-      - name: Build and push (multi-arch, via docker-bake.hcl)
-        uses: docker/bake-action@6614cfa25eff9a0b2b2697efb0b6159e7680d584 # v7.2.0
-        with:
-          # Read ONLY the bake file — bake would otherwise also merge the
-          # sibling compose.yml (extra targets + `${TZ}` interpolation warnings).
-          files: docker-bake.hcl
-          # The `default` group resolves to the single `glpi` target.
-          targets: glpi
-          push: true
-          # Attestations are declared in docker-bake.hcl (type=provenance,mode=max
-          # + type=sbom); re-asserting them here makes the release build's
-          # supply-chain posture explicit and independent of HCL edits.
-          provenance: mode=max
-          sbom: true
-        env:
-          # Bake reads env vars matching its `variable` names.
-          GLPI_VERSION: ${{ steps.version.outputs.version }}
-          GLPI_MINOR: ${{ steps.version.outputs.minor }}
-          GLPI_MAJOR: ${{ steps.version.outputs.major }}
-          GLPI_SHA256: ${{ steps.sha.outputs.glpi_sha256 }}
-          BUILD_DATE: ${{ steps.version.outputs.build_date }}
-          GIT_SHA: ${{ steps.version.outputs.git_sha }}
+  release:
+    needs: [version, build]
+    uses: netresearch/.github/.github/workflows/gh-release-image.yml@main
+    permissions:
+      contents: write
+    with:
+      # Only the newest semver release gets the "Latest" badge.
+      make-latest: ${{ needs.version.outputs.is_newest }}
+      body: |
+        ## Container image
 
-      - name: Install Cosign
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        ```bash
+        docker pull ghcr.io/netresearch/glpi-php-fpm:${{ needs.version.outputs.version }}
+        ```
 
-      - name: Sign the pushed tags (keyless OIDC)
-        env:
-          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          VERSION: ${{ steps.version.outputs.version }}
-          MINOR: ${{ steps.version.outputs.minor }}
-          MAJOR: ${{ steps.version.outputs.major }}
-        run: |
-          set -euo pipefail
-          # All four canonical tags point at the same multi-arch index digest.
-          # --recursive also signs the per-arch child manifests, so arch-pinned
-          # `cosign verify` of a resolved digest stays green too.
-          for tag in "$VERSION" "$MINOR" "$MAJOR" latest; do
-            cosign sign --yes --recursive "${IMAGE}:${tag}"
-          done
+        Tags published: `${{ needs.version.outputs.version }}`, `<major.minor>`,
+        `<major>`, `latest` (linux/amd64 + linux/arm64).
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
-        with:
-          # Auto-categorized from .github/release.yml; prepend the usage block.
-          generate_release_notes: true
-          # Only the newest semver release gets the "Latest" badge — a backport
-          # release of an older line must not steal it (GH marks latest by
-          # creation time otherwise).
-          make_latest: ${{ steps.version.outputs.is_newest }}
-          body: |
-            ## Container image
+        ## Verify the signature
 
-            ```bash
-            docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
-            ```
+        ```bash
+        cosign verify ghcr.io/netresearch/glpi-php-fpm:${{ needs.version.outputs.version }} \
+          --certificate-identity-regexp "https://github.com/netresearch/glpi-docker-compose-stack" \
+          --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
+        ```
 
-            Tags published for this release: `${{ steps.version.outputs.version }}`,
-            `${{ steps.version.outputs.minor }}`, `${{ steps.version.outputs.major }}`, `latest`
-            (linux/amd64 + linux/arm64).
+        ## SBOM
 
-            ## Verify the signature
+        ```bash
+        cosign download sbom ghcr.io/netresearch/glpi-php-fpm:${{ needs.version.outputs.version }}
+        ```
 
-            ```bash
-            cosign verify ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }} \
-              --certificate-identity-regexp "https://github.com/${{ github.repository }}" \
-              --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
-            ```
+        ---
 
-            ## SBOM
-
-            ```bash
-            cosign download sbom ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
-            ```
-
-            ---
-
-            This image bundles **GLPI ${{ steps.version.outputs.version }}**
-            (GPL-3.0-or-later). The Docker packaging in this repository is MIT.
+        This image bundles **GLPI ${{ needs.version.outputs.version }}**
+        (GPL-3.0-or-later). The Docker packaging in this repository is MIT.
