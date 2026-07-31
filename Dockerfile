@@ -26,7 +26,7 @@
 # renovate: datasource=docker depName=php versioning=docker
 ARG PHP_VERSION=8.4
 # renovate: datasource=docker depName=alpine versioning=docker
-ARG ALPINE_VERSION=3.21
+ARG ALPINE_VERSION=3.24
 
 # =====================================================================
 # Stage 1: fetch — download + verify the bundled GLPI release tarball
