@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.25
+# syntax=docker/dockerfile:1.26
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Netresearch DTT GmbH
 
