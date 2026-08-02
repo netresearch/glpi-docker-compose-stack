@@ -70,7 +70,7 @@ services:
   # Database
   # ---------------------------------------------------------------------
   db:
-    image: mariadb:11
+    image: mariadb:12
     restart: unless-stopped
     mem_limit: 2g
     cpus: 2.0
