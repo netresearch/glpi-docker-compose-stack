@@ -38,7 +38,7 @@ repos:
   # hadolint — Dockerfile lint (reads the repo's .hadolint.yaml). The -docker
   # variant needs no local hadolint install.
   - repo: https://github.com/hadolint/hadolint
-    rev: v2.14.0
+    rev: v2.15.1
     hooks:
       - id: hadolint-docker
 
