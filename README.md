@@ -23,24 +23,32 @@ The official `glpi/glpi` image is Apache + mod_php in a single container with a 
 
 ## Architecture
 
-```
-                         ┌──────────── host :8080 (loopback) / reverse proxy
-                         ▼
-                    ┌─────────┐   unix socket    ┌──────────────────┐
-   browser ───────▶│   web   │◀────────────────▶│       app        │
-                   │ nginx   │  /run/php-fpm/    │  glpi-php-fpm    │
-                   │ public/ │   glpi.sock       │  (GLPI 11.0.8)   │
-                   └─────────┘                   └───────┬──────────┘
-                        ▲ static assets                  │ mysqli      ┌──────────┐
-                        │ (glpi-public volume)           ├────────────▶│   db     │
-                   ┌──────────┐                          │             │ mariadb  │
-                   │app-assets│ one-shot public/ sync    │ cache       │ (binlog) │
-                   └──────────┘                          ├────────────▶└──────────┘
-                                                         │             ┌──────────┐
-   ┌───────────┐  docker exec  front/cron.php (2 min)    └────────────▶│  valkey  │
-   │ scheduler │──────────────▶ app                                    │  cache   │
-   │  ofelia   │──────────────▶ backup (phpbu, nightly 03:00)          └──────────┘
-   └───────────┘
+```mermaid
+flowchart TB
+    browser(["browser"]) --> ingress["host :8080 (loopback)<br>or reverse proxy"]
+
+    subgraph stack["compose stack"]
+        direction TB
+        web["web<br>nginx · public/"]
+        assets["app-assets<br>one-shot public/ sync"]
+        app["app<br>glpi-php-fpm · GLPI 11.0.8"]
+        db[("db<br>mariadb · binlog")]
+        cache[("valkey<br>cache")]
+        scheduler["scheduler<br>ofelia"]
+        dsp["docker-socket-proxy"]
+        backup["backup<br>phpbu · profile backup"]
+
+        assets -. "glpi-public volume" .-> web
+        web <== "unix socket<br>/run/php-fpm/glpi.sock" ==> app
+        app -- mysqli --> db
+        app -- cache --> cache
+        scheduler --> dsp
+        dsp -. "exec front/cron.php<br>every 2 min" .-> app
+        dsp -. "exec phpbu<br>nightly 03:00" .-> backup
+        backup -- dump --> db
+    end
+
+    ingress --> web
 ```
 
 | Service | Image | Role |
@@ -51,6 +59,7 @@ The official `glpi/glpi` image is Apache + mod_php in a single container with a 
 | `app` | `ghcr.io/netresearch/glpi-php-fpm` | GLPI on php-fpm, socket-only, non-root |
 | `web` | `nginx:alpine` | serves `public/` + FastCGI to `app`, CSP/security headers |
 | `scheduler` | `ghcr.io/netresearch/ofelia` | runs GLPI `front/cron.php` (2 min) + phpbu (nightly) |
+| `docker-socket-proxy` | `ghcr.io/tecnativa/docker-socket-proxy` | the only path `scheduler` has to the Docker API — scoped to `CONTAINERS`/`EXEC`, no raw socket in `scheduler` |
 | `backup` _(opt-in: `--profile backup`)_ | `ghcr.io/netresearch/phpbu-docker` | nightly DB dump + `files/` + **config (crypt key)** archive |
 
 ## Quickstart
