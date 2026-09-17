@@ -59,7 +59,7 @@ flowchart TB
 | `app` | `ghcr.io/netresearch/glpi-php-fpm` | GLPI on php-fpm, socket-only, non-root |
 | `web` | `nginx:alpine` | serves `public/` + FastCGI to `app`, CSP/security headers |
 | `scheduler` | `ghcr.io/netresearch/ofelia` | runs GLPI `front/cron.php` (2 min) + phpbu (nightly) |
-| `docker-socket-proxy` | `ghcr.io/tecnativa/docker-socket-proxy` | the only path `scheduler` has to the Docker API — scoped to `CONTAINERS`/`EXEC`, no raw socket in `scheduler` |
+| `docker-socket-proxy` | `ghcr.io/tecnativa/docker-socket-proxy` | the only path `scheduler` has to the Docker API — scoped to `CONTAINERS`/`EXEC`/`POST`, no raw socket in `scheduler` |
 | `backup` _(opt-in: `--profile backup`)_ | `ghcr.io/netresearch/phpbu-docker` | nightly DB dump + `files/` + **config (crypt key)** archive |
 
 ## Quickstart
