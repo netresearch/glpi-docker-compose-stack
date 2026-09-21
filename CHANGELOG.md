@@ -51,3 +51,11 @@ deployment of [GLPI](https://glpi-project.org/) built around a purpose-built
 - **Documentation**: README, migration guide, day-2 operations and restore
   runbooks, plus the standard community files (CONTRIBUTING, CODE_OF_CONDUCT,
   SECURITY) and a `pre-commit` configuration mirroring the CI lint gate.
+
+### Security
+
+- Bundled GLPI bumped from 11.0.8 to 11.0.9, a security release: ten high-severity
+  fixes, among them an unauthenticated SQL injection in the planning feature, an MFA
+  bypass, stored XSS in ticket actors and asset names, and a marketplace race that
+  allowed installing a malicious plugin.
+  Release notes: https://github.com/glpi-project/glpi/releases/tag/11.0.9

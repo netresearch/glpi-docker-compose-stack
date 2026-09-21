@@ -62,7 +62,7 @@ copy `/var/glpi/config` wholesale so the key comes along.
 
 **Know your source GLPI version.** This stack's image runs `database:update`
 on boot, applying GLPI's sequential migrations from your database's recorded
-version up to the image's version (currently 11.0.8). From a recent 10.0.x or
+version up to the image's version (currently 11.0.9). From a recent 10.0.x or
 11.0.x source this is supported. **⚠️ assumed for *your* specific source:** if
 you're on a much older release, upgrade the legacy instance to the latest
 10.0.x first to keep the jump inside a supported migration path — confirm
