@@ -2,5 +2,74 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
     "local>netresearch/renovate-config"
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Bundled GLPI release, pin 1 of 3: .glpi-version (a bare version on the first line). One manager per file so a pattern can only ever run against the file it was written for.",
+      "managerFilePatterns": [
+        "/^\\.glpi-version$/"
+      ],
+      "matchStrings": [
+        "^(?<currentValue>\\d+\\.\\d+\\.\\d+)\\s*$"
+      ],
+      "depNameTemplate": "glpi-project/glpi",
+      "datasourceTemplate": "github-releases",
+      "versioningTemplate": "semver"
+    },
+    {
+      "customType": "regex",
+      "description": "Bundled GLPI release, pin 2 of 3: ARG GLPI_VERSION in both Dockerfile stages. Renovate's built-in managers only see FROM lines; the tarball is fetched by version.",
+      "managerFilePatterns": [
+        "/^Dockerfile$/"
+      ],
+      "matchStrings": [
+        "ARG GLPI_VERSION=(?<currentValue>\\d+\\.\\d+\\.\\d+)"
+      ],
+      "depNameTemplate": "glpi-project/glpi",
+      "datasourceTemplate": "github-releases",
+      "versioningTemplate": "semver"
+    },
+    {
+      "customType": "regex",
+      "description": "Bundled GLPI release, pin 3 of 3: the docker-bake.hcl default.",
+      "managerFilePatterns": [
+        "/^docker-bake\\.hcl$/"
+      ],
+      "matchStrings": [
+        "variable \"GLPI_VERSION\" \\{\\s*default = \"(?<currentValue>\\d+\\.\\d+\\.\\d+)\""
+      ],
+      "depNameTemplate": "glpi-project/glpi",
+      "datasourceTemplate": "github-releases",
+      "versioningTemplate": "semver"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "GLPI major and minor bumps are a compatibility decision (schema, PHP requirements); the bot proposes patch releases only.",
+      "matchDatasources": [
+        "github-releases"
+      ],
+      "matchPackageNames": [
+        "glpi-project/glpi"
+      ],
+      "matchUpdateTypes": [
+        "major",
+        "minor"
+      ],
+      "enabled": false
+    },
+    {
+      "description": "The version is also named in prose (README, issue template, runbooks, a config comment); those lines are not managed here and go stale silently.",
+      "matchDatasources": [
+        "github-releases"
+      ],
+      "matchPackageNames": [
+        "glpi-project/glpi"
+      ],
+      "prBodyNotes": [
+        ":pencil: Before merging, grep the repository for the previous version string (`git grep -n '{{{currentValue}}}'`) and bump every prose mention on this branch: README, issue template, runbooks, CONTRIBUTING, the nginx config comment. Those lines are not managed by Renovate."
+      ]
+    }
   ]
 }
