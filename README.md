@@ -31,7 +31,7 @@ flowchart TB
         direction TB
         web["web<br>nginx · public/"]
         assets["app-assets<br>one-shot public/ sync"]
-        app["app<br>glpi-php-fpm · GLPI 11.0.8"]
+        app["app<br>glpi-php-fpm · GLPI 11.0.9"]
         db[("db<br>mariadb · binlog")]
         cache[("valkey<br>cache")]
         scheduler["scheduler<br>ofelia"]
@@ -179,9 +179,9 @@ docker run --rm ghcr.io/netresearch/glpi-php-fpm:latest \
 Verify provenance and signatures:
 
 ```bash
-gh attestation verify oci://ghcr.io/netresearch/glpi-php-fpm:11.0.8 \
+gh attestation verify oci://ghcr.io/netresearch/glpi-php-fpm:11.0.9 \
   --owner netresearch
-cosign verify ghcr.io/netresearch/glpi-php-fpm:11.0.8 \
+cosign verify ghcr.io/netresearch/glpi-php-fpm:11.0.9 \
   --certificate-identity-regexp 'https://github.com/netresearch/glpi-docker-compose-stack/.*' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```

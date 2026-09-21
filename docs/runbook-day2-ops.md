@@ -36,7 +36,7 @@ Two conventions used throughout:
 
 There are **two** version knobs and they mean different things:
 
-- **`.glpi-version`** (currently `11.0.8`) is the GLPI release the image is
+- **`.glpi-version`** (currently `11.0.9`) is the GLPI release the image is
   *built from*. It feeds the `GLPI_VERSION` build arg; the image bundles that
   GLPI tarball (no Composer step at runtime). It only matters if you **build**
   the image yourself.
@@ -52,7 +52,7 @@ Published tags follow the build workflow (`.github/workflows/_build-cell.yml`):
 | floating minor / major | `11.0`, `11` | daily |
 | floating latest | `latest` | daily |
 
-The floating tags (`latest`, `11`, `11.0`, `11.0.8`) are **rebuilt daily** so
+The floating tags (`latest`, `11`, `11.0`, `11.0.9`) are **rebuilt daily** so
 base-image (Alpine/PHP) CVE patches land without waiting for a GLPI release.
 For reproducible production deployments, pin `GLPI_IMAGE_TAG` to a **dated**
 tag and bump it deliberately; use `latest` only if you want automatic CVE

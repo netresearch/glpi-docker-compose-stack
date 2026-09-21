@@ -40,7 +40,7 @@ variable "REPO" {
 # GLPI release bundled into the image — keep in sync with .glpi-version.
 # GLPI release tags carry NO 'v' prefix (e.g. 11.0.8).
 variable "GLPI_VERSION" {
-  default = "11.0.8"
+  default = "11.0.9"
 }
 
 # GLPI major.minor + major, DERIVED from GLPI_VERSION so only GLPI_VERSION
