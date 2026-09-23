@@ -43,8 +43,8 @@
 #                        bin/compose-file.sh under tests/bin/. Uses
 #                        bats-core/bats-action to install bats + bats-support
 #                        + bats-assert on the runner; failures block PRs.
-#   - gitleaks         → delegates secret scanning (betterleaks, full history,
-#                        SARIF → code scanning) to gitleaks.yml@main.
+#   - betterleaks      → delegates secret scanning (betterleaks, full history,
+#                        SARIF → code scanning) to betterleaks.yml@main.
 #   - dependency-review → delegates PR dependency-diff review to
 #                        dependency-review.yml@main (pull_request only).
 
@@ -161,10 +161,10 @@ jobs:
       - name: Run regression suite
         run: bats tests/bin/
 
-  gitleaks:
+  betterleaks:
     # Secret scanning over full git history (betterleaks), SARIF -> code
     # scanning. The leaf skips merge_group + dependabot internally.
-    uses: netresearch/.github/.github/workflows/gitleaks.yml@main
+    uses: netresearch/.github/.github/workflows/betterleaks.yml@main
     permissions:
       contents: read
       security-events: write
