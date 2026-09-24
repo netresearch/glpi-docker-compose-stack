@@ -18,6 +18,9 @@ on:
       - 'examples/**'
   pull_request:
     branches: [main]
+  # The merge queue runs the required checks on its own temporary ref; without
+  # this trigger they never report there and every queue entry times out.
+  merge_group:
   workflow_dispatch:
     inputs:
       glpi_version:
@@ -101,6 +104,8 @@ jobs:
           [ "$REF_FULL" = "refs/heads/main" ] && IS_MAIN_REF=true
           PUSH_ARTIFACTS=true
           [ "$EVENT" = "pull_request" ] && PUSH_ARTIFACTS=false
+          # A merge-queue build validates a candidate merge; it must not publish.
+          [ "$EVENT" = "merge_group" ] && PUSH_ARTIFACTS=false
 
           {
             echo "version=$VERSION"

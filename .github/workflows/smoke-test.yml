@@ -24,6 +24,8 @@ name: smoke-test
 on:
   pull_request:
     branches: [main]
+  # Required checks must also report on the merge queue's temporary ref.
+  merge_group:
   push:
     branches: [main]
     paths-ignore:
