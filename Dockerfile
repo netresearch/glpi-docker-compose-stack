@@ -16,9 +16,9 @@
 # image both simpler and more reproducible than its Snipe-IT sibling.
 #
 # Build args:
-#   PHP_VERSION     — base PHP version (default 8.5; GLPI 12.0.x supports and
-#                     is tested upstream on PHP 8.3-8.5.)
-#   ALPINE_VERSION  — Alpine tag for the php images (default 3.21)
+#   PHP_VERSION     — base PHP version (default 8.5; GLPI 12.0.x supports
+#                     PHP 8.3-8.5, and its CI tests 8.3 and 8.5.)
+#   ALPINE_VERSION  — Alpine tag for the php images (default 3.24)
 #   GLPI_VERSION    — GLPI release (default 12.0.0 — keep in sync with .glpi-version)
 #   GLPI_SHA256     — sha256 of glpi-${GLPI_VERSION}.tgz (supply-chain pin; "" skips)
 

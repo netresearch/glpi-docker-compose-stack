@@ -47,13 +47,15 @@ Published tags follow the build workflow (`.github/workflows/_build-cell.yml`):
 
 | Tag | Example | Mutable? |
 |---|---|---|
-| exact version | `11.0.8` | re-pushed on each daily rebuild |
-| dated version | `11.0.8-20260628` | immutable — one build, never overwritten |
-| floating minor / major | `11.0`, `11` | daily |
+| exact version | `12.0.0` | re-pushed on each daily rebuild |
+| dated version | `12.0.0-20261008` | immutable — one build, never overwritten |
+| floating minor / major | `12.0`, `12` | daily |
 | floating latest | `latest` | daily |
 
 The floating tags (`latest`, `12`, `12.0`, `12.0.0`) are **rebuilt daily** so
 base-image (Alpine/PHP) CVE patches land without waiting for a GLPI release.
+Only the version in `.glpi-version` on `main` is rebuilt: since GLPI 12.0.0
+the `11`, `11.0` and `11.0.x` tags no longer get these rebuilds.
 For reproducible production deployments, pin `GLPI_IMAGE_TAG` to a **dated**
 tag and bump it deliberately; use `latest` only if you want automatic CVE
 patching and accept that the base moves under you.
@@ -77,6 +79,9 @@ the database schema to that major. An image of the previous major cannot run
 against the migrated schema, so take a backup before the upgrade (`make
 backup`); going back means restoring that backup
 ([runbook-restore.md](runbook-restore.md)), not only re-pinning the tag.
+`latest` and the floating major tag follow `.glpi-version`, so a deployment on
+`latest` takes such a major step with its next `make upgrade`. To choose the
+moment, pin a dated tag of the current version first.
 
 ### Build a new bundled GLPI yourself
 

@@ -232,7 +232,7 @@ If the problem is a broken image, not lost data, pin a previous **dated,
 immutable** tag instead of restoring data:
 
 ```bash
-# .env: GLPI_IMAGE_TAG=11.0.8-20260520
+# .env: GLPI_IMAGE_TAG=12.0.0-20261008
 docker compose pull
 docker compose up -d
 ```

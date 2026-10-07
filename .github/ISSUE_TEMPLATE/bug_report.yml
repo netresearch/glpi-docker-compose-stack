@@ -44,6 +44,7 @@ body:
         - "12.0 (floating major.minor)"
         - "12.0.0 (exact version — current pin in .glpi-version)"
         - "12.0.0-YYYYMMDD (immutable date-stamped)"
+        - "11.x (previous major, no longer rebuilt)"
         - "local build (`make build`)"
         - "other (please describe in Additional Context)"
     validations:
