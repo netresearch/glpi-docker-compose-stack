@@ -335,7 +335,10 @@ services:
     tmpfs:
       - /tmp:mode=1777,size=64M,noexec,nosuid,nodev
       - /var/cache/nginx:mode=0755,size=64M,nosuid,nodev
-      - /var/run:mode=0755,size=8M,nosuid,nodev
+      # PID file only (nginx.conf). A tmpfs on /var/run (= /run) would cover
+      # the fpm-sock volume at /run/php-fpm; whether it does depends on the
+      # order in which the Docker engine applies the mounts.
+      - /run/nginx:mode=0755,size=1M,nosuid,nodev
     networks:
       - glpi
 
