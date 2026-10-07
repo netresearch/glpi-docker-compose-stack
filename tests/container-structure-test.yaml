@@ -29,15 +29,15 @@
 schemaVersion: 2.0.0
 
 commandTests:
-  # PHP major.minor. GLPI 11.0.x is validated upstream on PHP 8.2-8.4; this
-  # image pins 8.4 (8.5 is intentionally not the default — not yet validated
-  # against GLPI 11.0.x). Match the line, not a patch level.
-  - name: php is 8.4.x
+  # PHP major.minor. GLPI 12.0.x supports and is tested upstream on PHP
+  # 8.3-8.5; this image pins 8.5, the highest of them. Match the line, not a
+  # patch level.
+  - name: php is 8.5.x
     command: php
     args: ["-v"]
-    expectedOutput: ["PHP 8\\.4\\."]
+    expectedOutput: ["PHP 8\\.5\\."]
 
-  # Every PHP extension GLPI 11 needs must be compiled in. Notes:
+  # Every PHP extension GLPI 12 needs must be compiled in. Notes:
   #   * `php -m` prints OPcache as the Zend extension "Zend OPcache", not a
   #     bare "opcache" line — match the real string.
   #   * GLPI talks to MariaDB/MySQL through mysqli (NOT pdo_mysql).

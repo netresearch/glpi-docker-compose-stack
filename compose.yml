@@ -353,7 +353,7 @@ services:
   # host root (a caller can create a privileged container bind-mounting /).
   # Only CONTAINERS + EXEC + POST are allowed here; everything else is denied.
   docker-socket-proxy:
-    image: ghcr.io/tecnativa/docker-socket-proxy:0.3.0
+    image: ghcr.io/tecnativa/docker-socket-proxy:v0.5.0
     restart: unless-stopped
     mem_limit: 64m
     cpus: 0.25
@@ -379,7 +379,7 @@ services:
       - glpi
 
   scheduler:
-    image: ghcr.io/netresearch/ofelia:latest@sha256:e71dd1d4f634e317355400e089b5a7547359819e10b9297f43d8e3871a36ed4a
+    image: ghcr.io/netresearch/ofelia:latest@sha256:1bb96f329c28589a141e2d8de09dceb45acc6c8334f97ade4dbbaee54e46f698
     restart: unless-stopped
     mem_limit: 64m
     cpus: 0.25

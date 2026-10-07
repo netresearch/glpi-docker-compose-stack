@@ -17,7 +17,7 @@ The official `glpi/glpi` image is Apache + mod_php in a single container with a 
 
 - **Decouples** PHP (php-fpm) from the web server (nginx) so each scales and updates independently, and php-fpm listens on a **unix socket only** (no FastCGI-over-TCP bypass surface).
 - Builds GLPI from the **bundled release tarball** into a minimal, **multi-stage, non-root** image with the code layer **read-only** and only the state dirs writable.
-- Serves from GLPI's **`public/` docroot** (mandatory in GLPI 11) with a strict **CSP** and security-header set.
+- Serves from GLPI's **`public/` docroot** (mandatory since GLPI 11) with a strict **CSP** and security-header set.
 - Ships **MariaDB with binlog** (point-in-time recovery), **Valkey** as GLPI's cache backend, **ofelia** running GLPI's `front/cron.php`, and **phpbu** for nightly DB + files + **encryption-key** backups.
 - Multi-arch images (amd64/arm64) with **SLSA provenance, an in-image SBOM, and keyless cosign signatures**, rebuilt daily for base-image CVEs.
 
@@ -31,7 +31,7 @@ flowchart TB
         direction TB
         web["web<br>nginx · public/"]
         assets["app-assets<br>one-shot public/ sync"]
-        app["app<br>glpi-php-fpm · GLPI 11.0.9"]
+        app["app<br>glpi-php-fpm · GLPI 12.0.0"]
         db[("db<br>mariadb · binlog")]
         cache[("valkey<br>cache")]
         scheduler["scheduler<br>ofelia"]
@@ -165,7 +165,7 @@ See `examples/compose.traefik.yml`, `examples/compose.caddy.yml`, and
 ## The image
 
 Built from GLPI's bundled release tarball (`glpi-X.Y.Z.tgz`, vendor included) on
-`php:8.4-fpm-alpine`. PHP extensions: `bcmath bz2 exif gd intl ldap mbstring
+`php:8.5-fpm-alpine`. PHP extensions: `bcmath bz2 exif gd intl ldap mbstring
 mysqli opcache redis sodium zip` plus the GLPI-required builtins. Runs as
 `www-data` (root-owned, read-only code), `tini` PID 1, `SIGQUIT` graceful stop,
 cgi-fcgi `/ping` healthcheck.
@@ -179,9 +179,9 @@ docker run --rm ghcr.io/netresearch/glpi-php-fpm:latest \
 Verify provenance and signatures:
 
 ```bash
-gh attestation verify oci://ghcr.io/netresearch/glpi-php-fpm:11.0.9 \
+gh attestation verify oci://ghcr.io/netresearch/glpi-php-fpm:12.0.0 \
   --owner netresearch
-cosign verify ghcr.io/netresearch/glpi-php-fpm:11.0.9 \
+cosign verify ghcr.io/netresearch/glpi-php-fpm:12.0.0 \
   --certificate-identity-regexp 'https://github.com/netresearch/glpi-docker-compose-stack/.*' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
