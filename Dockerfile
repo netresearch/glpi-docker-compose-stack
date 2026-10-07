@@ -16,15 +16,14 @@
 # image both simpler and more reproducible than its Snipe-IT sibling.
 #
 # Build args:
-#   PHP_VERSION     — base PHP version (default 8.4; GLPI 11.0.x is tested on
-#                     PHP 8.2-8.4. 8.5 is intentionally NOT the default — GLPI
-#                     11.0.x has not been validated against it upstream.)
-#   ALPINE_VERSION  — Alpine tag for the php images (default 3.21)
-#   GLPI_VERSION    — GLPI release (default 11.0.9 — keep in sync with .glpi-version)
+#   PHP_VERSION     — base PHP version (default 8.5; GLPI 12.0.x supports
+#                     PHP 8.3-8.5, and its CI tests 8.3 and 8.5.)
+#   ALPINE_VERSION  — Alpine tag for the php images (default 3.24)
+#   GLPI_VERSION    — GLPI release (default 12.0.0 — keep in sync with .glpi-version)
 #   GLPI_SHA256     — sha256 of glpi-${GLPI_VERSION}.tgz (supply-chain pin; "" skips)
 
 # renovate: datasource=docker depName=php versioning=docker
-ARG PHP_VERSION=8.4
+ARG PHP_VERSION=8.5
 # renovate: datasource=docker depName=alpine versioning=docker
 ARG ALPINE_VERSION=3.24
 
@@ -36,7 +35,7 @@ FROM alpine:${ALPINE_VERSION} AS fetch
 # pipefail — surface errors in piped curl downloads (hadolint DL4006)
 SHELL ["/bin/ash", "-o", "pipefail", "-c"]
 
-ARG GLPI_VERSION=11.0.11
+ARG GLPI_VERSION=12.0.0
 # Optional integrity pin. When set, the download is rejected unless its
 # sha256 matches — closes a supply-chain gap (a swapped release asset can't
 # slip through). Left empty by default so a bare `docker build` works; CI
@@ -75,8 +74,8 @@ FROM php:${PHP_VERSION}-fpm-alpine${ALPINE_VERSION} AS runtime
 # pipefail — surface errors in piped downloads (hadolint DL4006)
 SHELL ["/bin/ash", "-o", "pipefail", "-c"]
 
-ARG GLPI_VERSION=11.0.11
-ARG PHP_VERSION=8.4
+ARG GLPI_VERSION=12.0.0
+ARG PHP_VERSION=8.5
 ARG BUILD_DATE
 ARG VCS_REF
 
@@ -119,7 +118,10 @@ RUN set -eux; \
         oniguruma-dev openldap-dev libsodium-dev bzip2-dev \
     && docker-php-ext-configure gd --with-freetype --with-jpeg \
     && docker-php-ext-install -j"$(nproc)" \
-        bcmath bz2 exif gd intl ldap mbstring mysqli opcache sodium zip \
+        bcmath bz2 exif gd intl ldap mbstring mysqli sodium zip \
+    # PHP 8.5 compiles OPcache into the core, so it is built as an extension
+    # only on an older PHP_VERSION (docker-php-ext-install fails on 8.5).
+    && { php -m | grep -qix 'zend opcache' || docker-php-ext-install opcache; } \
     # phpredis — required for GLPI's redis/valkey cache backend
     # (cache:configure refuses a redis:// DSN without it). Pinned for
     # reproducible builds; bump deliberately.

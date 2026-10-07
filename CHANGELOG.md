@@ -18,7 +18,7 @@ deployment of [GLPI](https://glpi-project.org/) built around a purpose-built
 ### Added
 
 - **`glpi-php-fpm` image** built **from the bundled GLPI release tarball**
-  (vendor/ already included — no Composer step), on PHP 8.4 / Alpine 3.21, with
+  (vendor/ already included — no Composer step), on PHP 8.5 / Alpine 3.24, with
   the extensions GLPI needs: bcmath, bz2, exif, gd, intl, ldap, mbstring,
   mysqli, opcache, redis, sodium, zip.
   - Two-stage build with a `GLPI_SHA256` supply-chain integrity pin on the
@@ -51,6 +51,31 @@ deployment of [GLPI](https://glpi-project.org/) built around a purpose-built
 - **Documentation**: README, migration guide, day-2 operations and restore
   runbooks, plus the standard community files (CONTRIBUTING, CODE_OF_CONDUCT,
   SECURITY) and a `pre-commit` configuration mirroring the CI lint gate.
+
+### Changed
+
+- Bundled GLPI raised from 11.0.11 to 12.0.0, the new major release.
+  Release notes: https://github.com/glpi-project/glpi/releases/tag/12.0.0
+  - The existing database is migrated on the first start of the new image.
+    An 11.x image cannot run against the migrated schema; going back needs a
+    database restore.
+  - `latest`, `12` and `12.0` now point to GLPI 12, so a deployment on
+    `latest` (the `.env.example` default) upgrades with its next pull. The
+    `11`, `11.0` and `11.0.x` tags are no longer rebuilt.
+  - GLPI 12 makes knowledge base categories invisible on upgrade until access
+    is granted to them again.
+- PHP raised from 8.4 to 8.5, the highest version GLPI 12 supports (8.3 to 8.5). OPcache is
+  part of the PHP 8.5 core, so the image builds it as an extension only on an
+  older `PHP_VERSION`.
+- docker-socket-proxy raised from 0.3.0 to v0.5.0 (HAProxy 3).
+- ofelia `latest` digest refreshed.
+
+### Fixed
+
+- nginx kept its PID file on a tmpfs over `/var/run`, which is `/run`. Depending
+  on the order in which the Docker engine applies the mounts, that tmpfs covered
+  the php-fpm socket volume at `/run/php-fpm`, and every PHP request returned
+  502 (seen on Docker 29.8). The tmpfs now covers only `/run/nginx`.
 
 ### Security
 

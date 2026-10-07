@@ -36,7 +36,7 @@ Two conventions used throughout:
 
 There are **two** version knobs and they mean different things:
 
-- **`.glpi-version`** (currently `11.0.9`) is the GLPI release the image is
+- **`.glpi-version`** (currently `12.0.0`) is the GLPI release the image is
   *built from*. It feeds the `GLPI_VERSION` build arg; the image bundles that
   GLPI tarball (no Composer step at runtime). It only matters if you **build**
   the image yourself.
@@ -47,13 +47,15 @@ Published tags follow the build workflow (`.github/workflows/_build-cell.yml`):
 
 | Tag | Example | Mutable? |
 |---|---|---|
-| exact version | `11.0.8` | re-pushed on each daily rebuild |
-| dated version | `11.0.8-20260628` | immutable — one build, never overwritten |
-| floating minor / major | `11.0`, `11` | daily |
+| exact version | `12.0.0` | re-pushed on each daily rebuild |
+| dated version | `12.0.0-20261008` | immutable — one build, never overwritten |
+| floating minor / major | `12.0`, `12` | daily |
 | floating latest | `latest` | daily |
 
-The floating tags (`latest`, `11`, `11.0`, `11.0.9`) are **rebuilt daily** so
+The floating tags (`latest`, `12`, `12.0`, `12.0.0`) are **rebuilt daily** so
 base-image (Alpine/PHP) CVE patches land without waiting for a GLPI release.
+Only the version in `.glpi-version` on `main` is rebuilt: since GLPI 12.0.0
+the `11`, `11.0` and `11.0.x` tags no longer get these rebuilds.
 For reproducible production deployments, pin `GLPI_IMAGE_TAG` to a **dated**
 tag and bump it deliberately; use `latest` only if you want automatic CVE
 patching and accept that the base moves under you.
@@ -62,7 +64,7 @@ patching and accept that the base moves under you.
 
 ```bash
 # 1. pick the tag in .env
-GLPI_IMAGE_TAG=11.0.9          # or a dated tag, e.g. 11.0.9-20260701
+GLPI_IMAGE_TAG=12.0.0          # or a dated tag, e.g. 12.0.0-20261008
 
 # 2. pull + recreate + follow the app log
 make upgrade                   # = make pull && docker compose up -d && make logs-app
@@ -72,12 +74,21 @@ On boot the entrypoint detects the existing install and runs
 `database:update` (maintenance-wrapped — see below). Watch the log for
 `database:update complete`.
 
+A tag with a new GLPI **major** (for example `11.0.11` → `12.0.0`) migrates
+the database schema to that major. An image of the previous major cannot run
+against the migrated schema, so take a backup before the upgrade (`make
+backup`); going back means restoring that backup
+([runbook-restore.md](runbook-restore.md)), not only re-pinning the tag.
+`latest` and the floating major tag follow `.glpi-version`, so a deployment on
+`latest` takes such a major step with its next `make upgrade`. To choose the
+moment, pin a dated tag of the current version first.
+
 ### Build a new bundled GLPI yourself
 
 ```bash
 # 1. set the release + its tarball checksum (supply-chain pin)
-echo 11.0.9 > .glpi-version
-#    GLPI_SHA256 = sha256 of glpi-11.0.9.tgz from the GitHub release assets
+echo 12.0.0 > .glpi-version
+#    GLPI_SHA256 = sha256 of glpi-12.0.0.tgz from the GitHub release assets
 
 # 2. build + structure-test the runtime image locally
 make build
@@ -325,14 +336,15 @@ maintenance.
 
 ### Daily rebuild produced a broken floating tag
 
-A floating tag (`latest`/`11`/`11.0`/`11.0.8`) pulled today is broken. Roll
-back to the last-good **dated, immutable** tag:
+A floating tag (`latest`/`12`/`12.0`/`12.0.0`) pulled today is broken. Roll
+back to the last-good **dated, immutable** tag of the **same** GLPI version
+(a tag of an older GLPI major needs a database restore, see above):
 
 ```bash
 # 1. list dated tags (needs `crane`, or use the ghcr.io package UI)
-crane ls ghcr.io/netresearch/glpi-php-fpm | grep -E '^11\.0\.8-[0-9]{8}$' | sort -r | head
+crane ls ghcr.io/netresearch/glpi-php-fpm | grep -E '^12\.0\.0-[0-9]{8}$' | sort -r | head
 # 2. pin it
-echo 'GLPI_IMAGE_TAG=11.0.8-20260520' >> .env
+echo 'GLPI_IMAGE_TAG=12.0.0-20261008' >> .env
 # 3. re-up (both app and app-assets follow GLPI_IMAGE_TAG)
 docker compose pull
 docker compose up -d
