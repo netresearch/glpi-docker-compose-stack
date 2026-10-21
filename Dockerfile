@@ -106,7 +106,8 @@ ENV GLPI_CONFIG_DIR=/etc/glpi \
 # Runtime libraries (no -dev) the extensions link against, plus the small
 # operational toolset the entrypoint/healthcheck need (tini for signal
 # handling, su-exec for privilege drop, fcgi for the cgi-fcgi healthcheck).
-RUN set -eux; \
+RUN --mount=type=bind,from=ghcr.io/php/pie:1.5.2-bin@sha256:a254c78b51ca34daef0541fa1cf0147385c93ba5ca799868392275d947f00fe7,source=/pie,target=/usr/local/bin/pie \
+    set -eux; \
     apk add --no-cache \
         bash ca-certificates curl tini su-exec fcgi tzdata \
         icu-libs libpng libjpeg-turbo freetype libzip \
@@ -124,8 +125,9 @@ RUN set -eux; \
     && { php -m | grep -qix 'zend opcache' || docker-php-ext-install opcache; } \
     # phpredis — required for GLPI's redis/valkey cache backend
     # (cache:configure refuses a redis:// DSN without it). Pinned for
-    # reproducible builds; bump deliberately.
-    && pecl install redis-6.3.0 \
+    # reproducible builds; bump deliberately. Installed with PIE from Packagist,
+    # pecl.php.net is deprecated and its downloads fail.
+    && pie install --no-interaction phpredis/phpredis:6.3.0 \
     && docker-php-ext-enable redis \
     && apk del .build-deps \
     && rm -rf /tmp/* /var/cache/apk/* /usr/src/php* \
