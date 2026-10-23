@@ -379,7 +379,7 @@ services:
       - glpi
 
   scheduler:
-    image: ghcr.io/netresearch/ofelia:latest@sha256:1bb96f329c28589a141e2d8de09dceb45acc6c8334f97ade4dbbaee54e46f698
+    image: ghcr.io/netresearch/ofelia:latest@sha256:68143170168b15ca53755bd59294b0cfa6d154551c210ccf851abd5bca58fb4b
     restart: unless-stopped
     mem_limit: 64m
     cpus: 0.25
