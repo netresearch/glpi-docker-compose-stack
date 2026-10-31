@@ -35,7 +35,7 @@ FROM alpine:${ALPINE_VERSION} AS fetch
 # pipefail — surface errors in piped curl downloads (hadolint DL4006)
 SHELL ["/bin/ash", "-o", "pipefail", "-c"]
 
-ARG GLPI_VERSION=12.0.0
+ARG GLPI_VERSION=12.0.1
 # Optional integrity pin. When set, the download is rejected unless its
 # sha256 matches — closes a supply-chain gap (a swapped release asset can't
 # slip through). Left empty by default so a bare `docker build` works; CI
@@ -74,7 +74,7 @@ FROM php:${PHP_VERSION}-fpm-alpine${ALPINE_VERSION} AS runtime
 # pipefail — surface errors in piped downloads (hadolint DL4006)
 SHELL ["/bin/ash", "-o", "pipefail", "-c"]
 
-ARG GLPI_VERSION=12.0.0
+ARG GLPI_VERSION=12.0.1
 ARG PHP_VERSION=8.5
 ARG BUILD_DATE
 ARG VCS_REF
