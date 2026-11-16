@@ -155,7 +155,7 @@ jobs:
           persist-credentials: false
       # Installs bats, bats-support, bats-assert under /usr/lib/bats-*.
       # tests/bin/test_helper.bash sources support+assert from that path.
-      - uses: bats-core/bats-action@77d6fb60505b4d0d1d73e48bd035b55074bbfb43 # v4.0.0
+      - uses: bats-core/bats-action@3566550e0f594451ac0f58fcbfdeca93aa29a45e # 4.1.0
         with:
           # detik + file are kubernetes/filesystem helpers we don't use.
           detik-install: false
